@@ -1,0 +1,17 @@
+{
+  "clientName": "RETIF FITER",
+  "customerNumber": "C0000058",
+  "environment": "Sandbox-Training",
+  "orderNumberRegex": "ORDER N°(\\d{8})",
+  "dateRegex": "(\\d{2}/\\d{2}/\\d{4})",
+  "dateInputFormat": "dd/MM/yyyy",
+  "yourRefColumnXRange": [340, 440],
+  "qtyColumnXRange": [440, 485],
+  "itemCodePattern": "^[A-Z][A-Z0-9\\-]{2,}$",
+  "itemRowYMax": 415,
+  "itemRowYMin": 140,
+  "deliveryDateYRange": [128, 142],
+  "deliveryAddressXMin": 330,
+  "deliveryAddressYRange": [680, 742],
+  "shipToCountry": "FR"
+}

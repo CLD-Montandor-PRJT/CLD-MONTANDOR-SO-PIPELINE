@@ -1,0 +1,13 @@
+# Customer order PDFs — sensitive, never commit
+*/Not_Processed/
+*/Processed/
+
+# PdfPig DLL binaries — large, not source code
+lib/
+
+# Internal planning docs
+docs/superpowers/
+
+# PDF files anywhere in the tree
+*.pdf
+*.PDF
