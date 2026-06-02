@@ -138,9 +138,23 @@ function Get-PdfOrderData {
     $pdf     = [UglyToad.PdfPig.PdfDocument]::Open($PdfPath)
     $allText = ($pdf.GetPages() | ForEach-Object { $_.Text }) -join ' ' -replace '[\x00-\x1F]', ' '
 
-    # Order number
+    # Order number — regex on raw text, or coordinate scan if orderRefXRange defined
     $orderRef = ''
-    if ($allText -match $Template.orderNumberRegex) { $orderRef = $Matches[1] }
+    if ($Template.PSObject.Properties['orderNumberRegex'] -and $allText -match $Template.orderNumberRegex) {
+        $orderRef = $Matches[1]
+    }
+    if (-not $orderRef -and $Template.PSObject.Properties['orderRefXRange']) {
+        $xOR  = $Template.orderRefXRange
+        $yOR  = $Template.orderRefYRange
+        $orPat = if ($Template.PSObject.Properties['orderRefPattern']) { $Template.orderRefPattern } else { '^\d{4,6}$' }
+        foreach ($w in @($pdf.GetPages())[0].GetWords()) {
+            $b = [Math]::Round($w.BoundingBox.Bottom, 1)
+            $l = $w.BoundingBox.Left
+            if ($b -ge $yOR[0] -and $b -le $yOR[1] -and $l -ge $xOR[0] -and $l -le $xOR[1] -and $w.Text -match $orPat) {
+                $orderRef = $w.Text; break
+            }
+        }
+    }
 
     # Order date (first DD/MM/YYYY match in text = order date, before legal disclaimers)
     $orderDateBC = (Get-Date).ToString('yyyy-MM-dd')
@@ -497,6 +511,8 @@ foreach ($dir in $clientDirs) {
         Write-Host "  $($pdf.Name)" -ForegroundColor White
         try {
             $data = Get-PdfOrderData -PdfPath $pdf.FullName -Template $tpl -BcItemNumbers $bcItems
+            [System.GC]::Collect()
+            [System.GC]::WaitForPendingFinalizers()
 
             # Ship-to BC lookup for text-mode clients
             $isTextMode = $tpl.PSObject.Properties['extractionMode'] -and $tpl.extractionMode -eq 'text'

@@ -1,8 +1,10 @@
 {
   "clientName": "In Situ",
   "customerNumber": "C0000065",
-  "environment": "Sandbox-Training",
-  "orderNumberRegex": "IS(\\d+)ANDORRE",
+  "environment": "Production",
+  "orderRefXRange": [240, 290],
+  "orderRefYRange": [620, 635],
+  "orderRefPattern": "^\\d{4,6}$",
   "dateRegex": "(\\d{2}\\.\\d{2}\\.\\d{4})",
   "dateInputFormat": "dd.MM.yyyy",
   "yourRefColumnXRange": [460, 560],
