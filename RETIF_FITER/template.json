@@ -1,7 +1,7 @@
 {
   "clientName": "RETIF FITER",
   "customerNumber": "C0000058",
-  "environment": "Sandbox-Training",
+  "environment": "Production",
   "orderNumberRegex": "ORDER N°(\\d{8})",
   "dateRegex": "(\\d{2}/\\d{2}/\\d{4})",
   "dateInputFormat": "dd/MM/yyyy",

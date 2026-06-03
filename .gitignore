@@ -2,8 +2,16 @@
 */Not_Processed/
 */Processed/
 
-# PdfPig DLL binaries — large, not source code
-lib/
+# PdfPig package files — not needed at runtime
+lib/*.zip
+lib/*.nupkg
+lib/pdfpig_pkg/
+lib/uglytoad.pdfpig.core_pkg/
+lib/uglytoad.pdfpig.fonts_pkg/
+lib/uglytoad.pdfpig.tokenization_pkg/
+lib/uglytoad.pdfpig.tokens_pkg/
+
+# lib/dlls/ is committed — pipeline loads DLLs from there at runtime
 
 # Internal planning docs
 docs/superpowers/

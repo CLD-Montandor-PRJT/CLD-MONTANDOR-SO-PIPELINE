@@ -1,7 +1,7 @@
 {
   "clientName": "CR Distribution",
   "customerNumber": "C0000225",
-  "environment": "Sandbox-Training",
+  "environment": "Production",
   "extractionMode": "text",
   "orderNumberRegex": "COMMANDENUMERO:(\\d+)",
   "dateRegex": "(\\d{2}/\\d{2}/\\d{4})",
