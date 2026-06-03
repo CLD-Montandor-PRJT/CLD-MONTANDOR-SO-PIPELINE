@@ -175,7 +175,7 @@ function Get-BcOrderLines {
 
 # ---------------------------------------------------------------------------
 # Compare extracted PDF lines against existing BC order lines
-# Returns array of human-readable diff strings; empty array = identical
+# Returns array of {Type, ItemNumber, OldQty, NewQty} objects; empty = identical
 # ---------------------------------------------------------------------------
 function Compare-OrderLines {
     param([PSCustomObject[]]$NewLines, [PSCustomObject[]]$BcLines)
@@ -185,19 +185,21 @@ function Compare-OrderLines {
     foreach ($item in ($bcMap.Keys | Sort-Object)) {
         if ($newMap.ContainsKey($item)) {
             if ([Math]::Abs($newMap[$item] - $bcMap[$item]) -gt 0.001) {
-                $diff += "  $item   BC qty: $($bcMap[$item])  ->  New qty: $($newMap[$item])   [CHANGED]"
+                $diff += [PSCustomObject]@{ Type = 'Changed'; ItemNumber = $item; OldQty = $bcMap[$item]; NewQty = $newMap[$item] }
             }
         } else {
-            $diff += "  $item   BC qty: $($bcMap[$item])  ->  removed in new PO   [REMOVED]"
+            $diff += [PSCustomObject]@{ Type = 'Removed'; ItemNumber = $item; OldQty = $bcMap[$item]; NewQty = $null }
         }
     }
     foreach ($item in ($newMap.Keys | Sort-Object)) {
         if (-not $bcMap.ContainsKey($item)) {
-            $diff += "  $item   (not in BC)  ->  New qty: $($newMap[$item])   [ADDED]"
+            $diff += [PSCustomObject]@{ Type = 'Added'; ItemNumber = $item; OldQty = $null; NewQty = $newMap[$item] }
         }
     }
     return $diff
 }
+
+function Format-Qty { param($Q); if ($null -eq $Q) { return '-' }; if ($Q -eq [Math]::Floor($Q)) { return [string][int]$Q } else { return [string]$Q } }
 
 # ---------------------------------------------------------------------------
 # BC item catalogue (cached per environment, used by text-mode extraction)

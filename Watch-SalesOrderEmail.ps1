@@ -67,7 +67,7 @@ function Get-PdfAttachmentBytes {
 # Send a plain-text notification email to supcom@montandor.com via Graph API
 # ---------------------------------------------------------------------------
 function Send-NotificationEmail {
-    param([string]$Subject, [string]$Body, [string[]]$AlsoNotify = @())
+    param([string]$Subject, [string]$Body, [string[]]$AlsoNotify = @(), [string]$ContentType = 'Text')
     $recipients = @(@{ emailAddress = @{ address = $supcom } })
     foreach ($addr in $AlsoNotify) {
         $recipients += @{ emailAddress = @{ address = $addr } }
@@ -75,7 +75,7 @@ function Send-NotificationEmail {
     $payload = @{
         message = @{
             subject      = $Subject
-            body         = @{ contentType = 'Text'; content = $Body }
+            body         = @{ contentType = $ContentType; content = $Body }
             toRecipients = $recipients
         }
     } | ConvertTo-Json -Depth 5
@@ -86,6 +86,52 @@ function Send-NotificationEmail {
     } catch {
         Write-Host "    [WARN] Notification email failed: $($_.Exception.Message)" -ForegroundColor Yellow
     }
+}
+
+function Build-ModifiedOrderHtml {
+    param([string]$ClientName, [string]$OrderRef, [string]$SenderEmail, [string]$EmailSubject, [PSCustomObject[]]$Diff)
+
+    $rowColors = @{
+        Changed = @{ bg = '#fff3cd'; fg = '#856404' }
+        Added   = @{ bg = '#d4edda'; fg = '#155724' }
+        Removed = @{ bg = '#f8d7da'; fg = '#721c24' }
+    }
+
+    $rows = ''
+    foreach ($d in ($Diff | Sort-Object Type, ItemNumber)) {
+        $c      = $rowColors[$d.Type]
+        $wasStr = if ($null -eq $d.OldQty) { '&mdash;' } else { if ($d.OldQty -eq [Math]::Floor($d.OldQty)) { [int]$d.OldQty } else { $d.OldQty } }
+        $nowStr = if ($null -eq $d.NewQty) { '&mdash;' } else { if ($d.NewQty -eq [Math]::Floor($d.NewQty)) { [int]$d.NewQty } else { $d.NewQty } }
+        $rows += "<tr style='background:$($c.bg);color:$($c.fg)'>
+            <td style='padding:7px 12px;border:1px solid #ddd;font-weight:600'>$($d.ItemNumber)</td>
+            <td style='padding:7px 12px;border:1px solid #ddd'>$($d.Type)</td>
+            <td style='padding:7px 12px;border:1px solid #ddd;text-align:right'>$wasStr</td>
+            <td style='padding:7px 12px;border:1px solid #ddd;text-align:right'>$nowStr</td>
+        </tr>"
+    }
+
+    return "
+<html><body style='font-family:Arial,Calibri,sans-serif;font-size:13px;color:#333;max-width:700px;margin:0 auto;padding:20px'>
+  <h2 style='margin:0 0 4px'>Sales Order Pipeline &mdash; Modified Order</h2>
+  <p style='margin:0 0 16px;color:#666;font-size:12px'>The BC order has <strong>not</strong> been updated automatically. Please review and update manually if needed.</p>
+
+  <div style='background:#f0f0f0;padding:12px 16px;border-radius:4px;font-size:13px;margin-bottom:20px;line-height:2'>
+    <strong>Client:</strong> $ClientName &nbsp;&nbsp;&nbsp;
+    <strong>Order ref:</strong> $OrderRef <br>
+    <strong>From:</strong> $SenderEmail &nbsp;&nbsp;&nbsp;
+    <strong>Email:</strong> $EmailSubject
+  </div>
+
+  <table style='border-collapse:collapse;width:100%;font-size:13px'>
+    <thead><tr>
+      <th style='padding:8px 12px;border:1px solid #ddd;text-align:left;background:#343a40;color:#fff'>Item</th>
+      <th style='padding:8px 12px;border:1px solid #ddd;text-align:left;background:#343a40;color:#fff'>Change</th>
+      <th style='padding:8px 12px;border:1px solid #ddd;text-align:right;background:#343a40;color:#fff'>Previous Qty</th>
+      <th style='padding:8px 12px;border:1px solid #ddd;text-align:right;background:#343a40;color:#fff'>New Qty</th>
+    </tr></thead>
+    <tbody>$rows</tbody>
+  </table>
+</body></html>"
 }
 
 # ---------------------------------------------------------------------------
@@ -209,20 +255,16 @@ Action: The postcode is ambiguous — please post this order manually in BC.
                 if ($lineDiff.Count -gt 0) {
                     # Same order ref, different lines — customer likely modified their PO
                     Write-Host "    [NOTIFY] Modified PO detected — $($lineDiff.Count) line difference(s)." -ForegroundColor Yellow
+                    $html = Build-ModifiedOrderHtml `
+                        -ClientName   $tpl.clientName `
+                        -OrderRef     $data.OrderRef `
+                        -SenderEmail  $senderEmail `
+                        -EmailSubject $msg.subject `
+                        -Diff         $lineDiff
                     Send-NotificationEmail `
-                        -Subject "[Sales Order] Modified PO — $($tpl.clientName) ref $($data.OrderRef)" `
-                        -Body @"
-An Order has been received that matches an existing BC order but with different line items.
-The BC order has NOT been updated automatically. Please review and update manually if needed.
-
-Client:    $($tpl.clientName)
-Order ref: $($data.OrderRef)
-From:      $senderEmail
-Email:     $($msg.subject)
-
-Changes vs existing BC order:
-$($lineDiff -join "`n")
-"@
+                        -Subject     "[Sales Order] Modified Order — $($tpl.clientName) ref $($data.OrderRef)" `
+                        -Body        $html `
+                        -ContentType 'HTML'
                 } else {
                     # True duplicate (same lines) — silent regardless of email age
                     Write-Host "    [SKIP] Order ref $($data.OrderRef) already in BC, lines unchanged." -ForegroundColor Yellow
