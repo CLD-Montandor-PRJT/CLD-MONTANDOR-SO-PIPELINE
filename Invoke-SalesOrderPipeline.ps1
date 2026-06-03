@@ -129,12 +129,11 @@ function Test-BcOrderExists {
     $r1 = Invoke-RestMethod -Uri "$odata/SalesOrder?`$filter=$f1&`$select=No&`$top=1" -Headers $authHeader
     if (@($r1.value).Count -gt 0) { return $true }
 
-    # Posted invoices — only if web service is published in BC
-    try {
-        $f2 = "Sell_to_Customer_No eq '$CustomerNumber' and Your_Reference eq '$OrderRef'"
-        $r2 = Invoke-RestMethod -Uri "$odata/PostedSalesInvoice?`$filter=$f2&`$select=No&`$top=1" -Headers $authHeader
-        if (@($r2.value).Count -gt 0) { return $true }
-    } catch { }
+    # Posted invoices — via Order Pipeline AL extension (api/montandor/pipeline/v1.0)
+    $pipelineBase = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/api/montandor/pipeline/v1.0/companies($companyId)"
+    $f2 = "sellToCustomerNo eq '$CustomerNumber' and yourReference eq '$OrderRef'"
+    $r2 = Invoke-RestMethod -Uri "$pipelineBase/postedSalesInvoices?`$filter=$f2&`$select=no&`$top=1" -Headers $authHeader
+    if (@($r2.value).Count -gt 0) { return $true }
 
     return $false
 }
