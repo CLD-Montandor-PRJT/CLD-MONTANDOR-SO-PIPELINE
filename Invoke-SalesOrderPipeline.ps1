@@ -324,9 +324,9 @@ function Get-PdfOrderData {
             $b = [Math]::Round($word.BoundingBox.Bottom, 1)
             $l = $word.BoundingBox.Left
 
-            # Line item rows
+            # Line item rows — key includes page number so identical Y coords on different pages don't collide
             if ($b -ge $yMin -and $b -le $yMax) {
-                $key = $b.ToString()
+                $key = "P${pageNum}_${b}"
                 if (-not $rowData.ContainsKey($key)) { $rowData[$key] = @{ ref = ''; qty = '' } }
                 if ($l -ge $xRef[0] -and $l -le $xRef[1] -and
                     -not $rowData[$key].ref -and $word.Text -match $codePat) {
@@ -398,7 +398,7 @@ function Get-PdfOrderData {
     if (Test-Path $mapPath) { $mapping = Get-Content $mapPath | ConvertFrom-Json }
 
     $lines = @()
-    foreach ($key in ($rowData.Keys | Sort-Object { [double]$_ } -Descending)) {
+    foreach ($key in ($rowData.Keys | Sort-Object { [double]($_ -replace '^P\d+_', '') } -Descending)) {
         $row = $rowData[$key]
         if ($row.ref -and $row.qty) {
             $item = $row.ref
