@@ -88,6 +88,63 @@ function Send-NotificationEmail {
     }
 }
 
+function Build-InfoBox {
+    param([hashtable]$Fields, [string]$Bg = '#f0f0f0')
+    $rows = ($Fields.GetEnumerator() | ForEach-Object {
+        "<tr><td style='padding:4px 12px 4px 0;font-weight:600;white-space:nowrap;color:#555'>$($_.Key)</td><td style='padding:4px 0'>$($_.Value)</td></tr>"
+    }) -join ''
+    return "<div style='background:$Bg;padding:12px 16px;border-radius:4px;margin-bottom:20px'><table style='font-size:13px;border:none'>$rows</table></div>"
+}
+
+function Build-AlertBox {
+    param([string]$Message, [string]$Bg = '#fff3cd', [string]$Fg = '#856404', [string]$Border = '#ffc107')
+    return "<div style='background:$Bg;color:$Fg;border-left:4px solid $Border;padding:12px 16px;border-radius:0 4px 4px 0;margin-bottom:20px;font-size:13px'>$Message</div>"
+}
+
+function Build-HtmlShell {
+    param([string]$Title, [string]$Subtitle, [string]$Body)
+    return "<html><body style='font-family:Arial,Calibri,sans-serif;font-size:13px;color:#333;max-width:700px;margin:0 auto;padding:20px'>
+  <h2 style='margin:0 0 4px'>Sales Order Pipeline &mdash; $Title</h2>
+  <p style='margin:0 0 16px;color:#666;font-size:12px'>$Subtitle</p>
+  $Body
+</body></html>"
+}
+
+function Build-ShipToNotFoundHtml {
+    param([string]$ClientName, [string]$OrderRef, [string]$SenderEmail, [string]$EmailSubject, [string]$PostCode)
+    $info   = Build-InfoBox ([ordered]@{ Client=''; 'Order ref'=''; From=''; Email='' })
+    # Build ordered hashtable properly
+    $fields = [ordered]@{ 'Client' = $ClientName; 'Order ref' = $OrderRef; 'From' = $SenderEmail; 'Email' = $EmailSubject; 'Postcode' = "<strong>$PostCode</strong>" }
+    $info   = Build-InfoBox $fields
+    $alert  = Build-AlertBox "Add postcode <strong>$PostCode</strong> as a ship-to address for <strong>$ClientName</strong> in BC. The order will be picked up automatically on the next watcher run."
+    return Build-HtmlShell -Title 'Action Required' -Subtitle 'This order could not be posted — delivery postcode not registered in BC.' -Body "$info$alert"
+}
+
+function Build-AmbiguousPostcodeHtml {
+    param([string]$ClientName, [string]$OrderRef, [string]$SenderEmail, [string]$EmailSubject, [string]$PostCode, [string]$Matches)
+    $fields = [ordered]@{ 'Client' = $ClientName; 'Order ref' = $OrderRef; 'From' = $SenderEmail; 'Email' = $EmailSubject; 'Postcode' = "<strong>$PostCode</strong>"; 'Matching codes' = "<strong>$Matches</strong>" }
+    $info   = Build-InfoBox $fields
+    $alert  = Build-AlertBox "Postcode <strong>$PostCode</strong> matches multiple ship-to addresses. Please post this order manually in BC."
+    return Build-HtmlShell -Title 'Action Required' -Subtitle 'This order could not be posted — delivery postcode matches multiple ship-to addresses.' -Body "$info$alert"
+}
+
+function Build-ProcessingErrorHtml {
+    param([string]$ClientName, [string]$SenderEmail, [string]$EmailSubject, [string]$FileName,
+          [string]$ErrorMessage, [string]$ExceptionType = '', [string]$FailingLine = '', [string]$StackTrace = '')
+    $fields = [ordered]@{ 'Client' = $ClientName; 'From' = $SenderEmail; 'Email' = $EmailSubject; 'File' = $FileName }
+    $info   = Build-InfoBox $fields
+    $alert  = Build-AlertBox -Message "<strong>$ExceptionType</strong><br>$([System.Net.WebUtility]::HtmlEncode($ErrorMessage))" -Bg '#f8d7da' -Fg '#721c24' -Border '#f5c6cb'
+    $detail = ''
+    if ($FailingLine) {
+        $detail += "<div style='margin-bottom:12px'><p style='margin:0 0 4px;font-weight:600;font-size:12px;color:#555'>FAILING LINE</p><pre style='background:#f8f8f8;border:1px solid #ddd;border-radius:4px;padding:10px;font-size:12px;margin:0;overflow-x:auto'>$([System.Net.WebUtility]::HtmlEncode($FailingLine.Trim()))</pre></div>"
+    }
+    if ($StackTrace) {
+        $detail += "<div style='margin-bottom:12px'><p style='margin:0 0 4px;font-weight:600;font-size:12px;color:#555'>STACK TRACE</p><pre style='background:#f8f8f8;border:1px solid #ddd;border-radius:4px;padding:10px;font-size:12px;margin:0;overflow-x:auto'>$([System.Net.WebUtility]::HtmlEncode($StackTrace))</pre></div>"
+    }
+    $note   = "<p style='color:#555;font-size:12px;margin:12px 0 0'>The order has <strong>not</strong> been posted to BC. Please review and process manually if needed.</p>"
+    return Build-HtmlShell -Title 'Processing Error' -Subtitle 'An error occurred while processing a purchase order PDF.' -Body "$info$alert$detail$note"
+}
+
 function Build-ModifiedOrderHtml {
     param([string]$ClientName, [string]$OrderRef, [string]$SenderEmail, [string]$EmailSubject, [PSCustomObject[]]$Diff)
 
@@ -201,19 +258,9 @@ foreach ($msg in $msgs.value) {
                     Write-Host "    [SKIP] No BC ship-to for postcode $($data.ShipToPostCode)" -ForegroundColor Yellow
                     $skipOrder = $true; $emailOk = $false
                     Send-NotificationEmail `
-                        -Subject "[Sales Order] Action required — $($tpl.clientName) ref $($data.OrderRef)" `
-                        -Body @"
-A purchase order could not be posted to BC because the delivery postcode is not registered as a ship-to address.
-
-Client:    $($tpl.clientName)
-Order ref: $($data.OrderRef)
-From:      $senderEmail
-Email:     $($msg.subject)
-Postcode:  $($data.ShipToPostCode)
-
-Action: Add postcode $($data.ShipToPostCode) as a ship-to address for $($tpl.clientName) in BC.
-The order will be picked up automatically on the next watcher run.
-"@
+                        -Subject      "[Sales Order] Action required — $($tpl.clientName) ref $($data.OrderRef)" `
+                        -Body         (Build-ShipToNotFoundHtml -ClientName $tpl.clientName -OrderRef $data.OrderRef -SenderEmail $senderEmail -EmailSubject $msg.subject -PostCode $data.ShipToPostCode) `
+                        -ContentType  'HTML'
                 } elseif ($candidates.Count -eq 1) {
                     $shipToCode = $candidates[0].code
                     Write-Host "    Ship-to: $shipToCode — $($candidates[0].displayName)" -ForegroundColor Green
@@ -222,19 +269,9 @@ The order will be picked up automatically on the next watcher run.
                     Write-Host "    [SKIP] Ambiguous postcode $($data.ShipToPostCode): $codes" -ForegroundColor Yellow
                     $skipOrder = $true; $emailOk = $false
                     Send-NotificationEmail `
-                        -Subject "[Sales Order] Action required — $($tpl.clientName) ref $($data.OrderRef)" `
-                        -Body @"
-A purchase order could not be posted to BC because multiple ship-to addresses match the delivery postcode.
-
-Client:    $($tpl.clientName)
-Order ref: $($data.OrderRef)
-From:      $senderEmail
-Email:     $($msg.subject)
-Postcode:  $($data.ShipToPostCode)
-Matches:   $codes
-
-Action: The postcode is ambiguous — please post this order manually in BC.
-"@
+                        -Subject     "[Sales Order] Action required — $($tpl.clientName) ref $($data.OrderRef)" `
+                        -Body        (Build-AmbiguousPostcodeHtml -ClientName $tpl.clientName -OrderRef $data.OrderRef -SenderEmail $senderEmail -EmailSubject $msg.subject -PostCode $data.ShipToPostCode -Matches $codes) `
+                        -ContentType 'HTML'
                 }
             }
 
@@ -275,23 +312,17 @@ Action: The postcode is ambiguous — please post this order manually in BC.
                 $ordersPosted++
             }
         } catch {
-            $errMsg = $_.Exception.Message
+            $errMsg    = $_.Exception.Message
+            $errType   = $_.Exception.GetType().Name
+            $errLine   = if ($_.InvocationInfo.Line)        { $_.InvocationInfo.Line }        else { '' }
+            $errStack  = if ($_.ScriptStackTrace)           { $_.ScriptStackTrace }           else { '' }
             Write-Host "    [ERROR] $errMsg" -ForegroundColor Red
             $emailOk = $false
             Send-NotificationEmail `
-                -Subject "[Sales Order] Error — $($tpl.clientName) $($att.name)" `
-                -AlsoNotify @('x.planchette@montandor.com') `
-                -Body @"
-An error occurred while processing a purchase order PDF. The order has NOT been posted to BC.
-
-Client:    $($tpl.clientName)
-Email:     $($msg.subject)
-From:      $senderEmail
-File:      $($att.name)
-Error:     $errMsg
-
-Please review and process this order manually if needed.
-"@
+                -Subject     "[Sales Order] Error — $($tpl.clientName) $($att.name)" `
+                -AlsoNotify  @('x.planchette@montandor.com') `
+                -Body        (Build-ProcessingErrorHtml -ClientName $tpl.clientName -SenderEmail $senderEmail -EmailSubject $msg.subject -FileName $att.name -ErrorMessage $errMsg -ExceptionType $errType -FailingLine $errLine -StackTrace $errStack) `
+                -ContentType 'HTML'
         }
     }
 
