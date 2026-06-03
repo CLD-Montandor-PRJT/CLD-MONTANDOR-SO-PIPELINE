@@ -117,7 +117,7 @@ function Build-ShipToNotFoundHtml {
     $fields = [ordered]@{ 'Client' = $ClientName; 'Order ref' = $OrderRef; 'From' = $SenderEmail; 'Email' = $EmailSubject; 'Postcode' = "<strong>$PostCode</strong>" }
     $info   = Build-InfoBox $fields
     $alert  = Build-AlertBox "Add postcode <strong>$PostCode</strong> as a ship-to address for <strong>$ClientName</strong> in BC. The order will be picked up automatically on the next watcher run."
-    return Build-HtmlShell -Title 'Action Required' -Subtitle 'This order could not be posted — delivery postcode not registered in BC.' -Body "$info$alert"
+    return Build-HtmlShell -Title 'Delivery postcode not registered in BC' -Subtitle 'This order has not been posted and requires manual action.' -Body "$info$alert"
 }
 
 function Build-AmbiguousPostcodeHtml {
@@ -125,7 +125,7 @@ function Build-AmbiguousPostcodeHtml {
     $fields = [ordered]@{ 'Client' = $ClientName; 'Order ref' = $OrderRef; 'From' = $SenderEmail; 'Email' = $EmailSubject; 'Postcode' = "<strong>$PostCode</strong>"; 'Matching codes' = "<strong>$Matches</strong>" }
     $info   = Build-InfoBox $fields
     $alert  = Build-AlertBox "Postcode <strong>$PostCode</strong> matches multiple ship-to addresses. Please post this order manually in BC."
-    return Build-HtmlShell -Title 'Action Required' -Subtitle 'This order could not be posted — delivery postcode matches multiple ship-to addresses.' -Body "$info$alert"
+    return Build-HtmlShell -Title 'Delivery postcode matches multiple ship-to addresses' -Subtitle 'This order has not been posted and requires manual action.' -Body "$info$alert"
 }
 
 function Build-ProcessingErrorHtml {
