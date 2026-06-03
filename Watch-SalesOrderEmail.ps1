@@ -212,7 +212,7 @@ Action: The postcode is ambiguous — please post this order manually in BC.
                     Send-NotificationEmail `
                         -Subject "[Sales Order] Modified PO — $($tpl.clientName) ref $($data.OrderRef)" `
                         -Body @"
-A purchase order has been received that matches an existing BC order but with different line items.
+An Order has been received that matches an existing BC order but with different line items.
 The BC order has NOT been updated automatically. Please review and update manually if needed.
 
 Client:    $($tpl.clientName)
