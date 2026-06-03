@@ -74,7 +74,7 @@ $clientSecret = [WinCredPL]::GetSecret('Montandor_BC_ClientSecret')
 # ---------------------------------------------------------------------------
 # OAuth token
 # ---------------------------------------------------------------------------
-Write-Host '[AUTH] Acquiring OAuth token...' -ForegroundColor Cyan
+Write-Host '[AUTH] Acquiring OAuth tokens...' -ForegroundColor Cyan
 $token = Invoke-RestMethod -Method Post `
     -Uri "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token" `
     -Body @{
@@ -84,11 +84,22 @@ $token = Invoke-RestMethod -Method Post `
         scope         = 'https://api.businesscentral.dynamics.com/.default'
     } -ContentType 'application/x-www-form-urlencoded'
 
-$authHeader = @{ Authorization = "Bearer $($token.access_token)" }
-$jsonHeader = $authHeader + @{ 'Content-Type' = 'application/json' }
+$graphToken = Invoke-RestMethod -Method Post `
+    -Uri "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token" `
+    -Body @{
+        grant_type    = 'client_credentials'
+        client_id     = $clientId
+        client_secret = $clientSecret
+        scope         = 'https://graph.microsoft.com/.default'
+    } -ContentType 'application/x-www-form-urlencoded'
+
+$authHeader  = @{ Authorization = "Bearer $($token.access_token)" }
+$jsonHeader  = $authHeader + @{ 'Content-Type' = 'application/json' }
+$graphHeader = @{ Authorization = "Bearer $($graphToken.access_token)" }
 $companyId   = '4e422ae7-867a-ef11-a671-000d3a45ce6c'
 $bcItemCache = @{}
-Write-Host "  Token acquired. Expires in $($token.expires_in)s." -ForegroundColor Green
+Write-Host "  BC token acquired. Expires in $($token.expires_in)s." -ForegroundColor Green
+Write-Host "  Graph token acquired. Expires in $($graphToken.expires_in)s." -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
 # Error helper — extracts BC's JSON error message from a failed Invoke-RestMethod
@@ -103,6 +114,20 @@ function Get-ApiError {
         return $Err.ErrorDetails.Message   # raw body if not JSON
     }
     return $Err.Exception.Message
+}
+
+# ---------------------------------------------------------------------------
+# Deduplication — checks open sales orders AND posted invoices
+# ---------------------------------------------------------------------------
+function Test-BcOrderExists {
+    param([string]$CustomerNumber, [string]$OrderRef, [string]$Environment)
+    if (-not $OrderRef) { return $false }
+    $base   = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/api/v2.0/companies($companyId)"
+    $filter = "customerNumber eq '$CustomerNumber' and externalDocumentNumber eq '$OrderRef'"
+    $r1 = Invoke-RestMethod -Uri "$base/salesOrders?`$filter=$filter&`$select=number&`$top=1" -Headers $authHeader
+    if (@($r1.value).Count -gt 0) { return $true }
+    $r2 = Invoke-RestMethod -Uri "$base/postedSalesInvoices?`$filter=$filter&`$select=number&`$top=1" -Headers $authHeader
+    return @($r2.value).Count -gt 0
 }
 
 # ---------------------------------------------------------------------------
@@ -133,9 +158,15 @@ function Get-BcItemNumbers {
 # PDF extraction (coordinate-based)
 # ---------------------------------------------------------------------------
 function Get-PdfOrderData {
-    param([string]$PdfPath, [PSCustomObject]$Template, [string[]]$BcItemNumbers = @())
+    param(
+        [string]$PdfPath     = '',
+        [byte[]]$PdfBytes    = $null,
+        [PSCustomObject]$Template,
+        [string[]]$BcItemNumbers = @()
+    )
 
-    $pdf     = [UglyToad.PdfPig.PdfDocument]::Open($PdfPath)
+    $pdf = if ($PdfBytes) { [UglyToad.PdfPig.PdfDocument]::Open($PdfBytes) }
+           else           { [UglyToad.PdfPig.PdfDocument]::Open($PdfPath)  }
     $allText = ($pdf.GetPages() | ForEach-Object { $_.Text }) -join ' ' -replace '[\x00-\x1F]', ' '
 
     # Order number — regex on raw text, or coordinate scan if orderRefXRange defined
@@ -400,8 +431,10 @@ function Submit-SalesOrder {
     # Step 1: POST sales order header
     $order = $null
     try {
+        $postBody = @{ customerNumber = $Template.customerNumber; orderDate = $OrderData.OrderDate }
+        if ($OrderData.OrderRef) { $postBody['externalDocumentNumber'] = $OrderData.OrderRef }
         $order   = Invoke-RestMethod -Method Post -Uri "$apiBase/salesOrders" -Headers $jsonHeader `
-            -Body (@{ customerNumber = $Template.customerNumber; orderDate = $OrderData.OrderDate } | ConvertTo-Json)
+            -Body ($postBody | ConvertTo-Json)
         Write-Host "    [OK] Order header created: $($order.number)" -ForegroundColor Green
     } catch {
         throw "POST sales order header failed: $(Get-ApiError $_)"
@@ -535,17 +568,26 @@ foreach ($dir in $clientDirs) {
                 }
             }
 
+            # Deduplication check (runs in both dry-run and execute modes)
+            $alreadyExists = $false
+            if ($data.OrderRef) {
+                $alreadyExists = Test-BcOrderExists -CustomerNumber $tpl.customerNumber -OrderRef $data.OrderRef -Environment $tpl.environment
+            }
+
             Write-Host "    Order ref        : $($data.OrderRef)"
             Write-Host "    Order date       : $($data.OrderDate)"
             Write-Host "    Requested deliv. : $(if($data.DeliveryDate){$data.DeliveryDate}else{'(not found)'})"
             Write-Host "    Ship-to          : $stLabel"
+            Write-Host "    Duplicate check  : $(if($alreadyExists){'ALREADY IN BC — would skip'}elseif(-not $data.OrderRef){'(no order ref — cannot check)'}else{'OK'})"
             Write-Host "    Lines ($($data.Lines.Count)):"
             $data.Lines | ForEach-Object {
                 Write-Host ("      {0,-22} qty {1}" -f $_.ItemNumber, $_.Quantity)
             }
 
             if (-not $DryRun) {
-                if ($skipOrder) {
+                if ($alreadyExists) {
+                    Write-Host "    [SKIP] Order ref $($data.OrderRef) already exists in BC (open, released, or posted)." -ForegroundColor Yellow
+                } elseif ($skipOrder) {
                     Write-Host "    [SKIP] Order not posted — register ship-to postcode $($data.ShipToPostCode) in BC and resubmit." -ForegroundColor Yellow
                 } else {
                     $bcNo = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode
