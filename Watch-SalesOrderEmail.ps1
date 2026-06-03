@@ -64,17 +64,6 @@ function Get-PdfAttachmentBytes {
 }
 
 # ---------------------------------------------------------------------------
-# Mark an email as read in the inbox
-# ---------------------------------------------------------------------------
-function Set-EmailRead {
-    param([string]$MessageId)
-    Invoke-RestMethod -Method Patch `
-        -Uri "$graphBase/messages/$MessageId" `
-        -Headers ($graphHeader + @{ 'Content-Type' = 'application/json' }) `
-        -Body '{"isRead":true}' | Out-Null
-}
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 $today = (Get-Date -Hour 0 -Minute 0 -Second 0).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -174,10 +163,9 @@ foreach ($msg in $msgs.value) {
     }
 
     if ($emailOk) {
-        Set-EmailRead -MessageId $msg.id
-        Write-Host "  Email marked as read." -ForegroundColor Green
+        Write-Host "  All PDFs processed." -ForegroundColor Green
     } else {
-        Write-Host "  Email left unread — will retry on next run." -ForegroundColor Yellow
+        Write-Host "  One or more PDFs had errors — will retry on next run." -ForegroundColor Yellow
     }
 }
 
