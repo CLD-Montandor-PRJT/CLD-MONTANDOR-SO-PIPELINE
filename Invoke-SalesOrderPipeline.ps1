@@ -150,6 +150,56 @@ function Get-BcShipToCode {
 }
 
 # ---------------------------------------------------------------------------
+# Fetch open sales order lines from BC (for change detection)
+# Returns array of {ItemNumber, Quantity} objects, or $null if order is posted/unavailable
+# ---------------------------------------------------------------------------
+function Get-BcOrderLines {
+    param([string]$CustomerNumber, [string]$OrderRef, [string]$Environment)
+    $apiBase = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/api/v2.0/companies($companyId)"
+    try {
+        $orders = Invoke-RestMethod `
+            -Uri "$apiBase/salesOrders?`$filter=customerNumber eq '$CustomerNumber' and yourReference eq '$OrderRef'&`$select=id" `
+            -Headers $authHeader
+        if (@($orders.value).Count -eq 0) { return $null }  # posted invoice — no open order to compare
+        $orderId    = $orders.value[0].id
+        $linesResp  = Invoke-RestMethod `
+            -Uri "$apiBase/salesOrders($orderId)/salesOrderLines?`$filter=lineType eq 'Item'&`$select=lineObjectNumber,quantity" `
+            -Headers $authHeader
+        return @($linesResp.value | ForEach-Object {
+            [PSCustomObject]@{ ItemNumber = $_.lineObjectNumber; Quantity = $_.quantity }
+        })
+    } catch {
+        return $null  # treat as simple duplicate if lines cannot be fetched
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Compare extracted PDF lines against existing BC order lines
+# Returns array of human-readable diff strings; empty array = identical
+# ---------------------------------------------------------------------------
+function Compare-OrderLines {
+    param([PSCustomObject[]]$NewLines, [PSCustomObject[]]$BcLines)
+    $newMap = @{}; foreach ($l in $NewLines) { $newMap[$l.ItemNumber] = $l.Quantity }
+    $bcMap  = @{}; foreach ($l in $BcLines)  { $bcMap[$l.ItemNumber]  = $l.Quantity }
+    $diff = @()
+    foreach ($item in ($bcMap.Keys | Sort-Object)) {
+        if ($newMap.ContainsKey($item)) {
+            if ([Math]::Abs($newMap[$item] - $bcMap[$item]) -gt 0.001) {
+                $diff += "  $item   BC qty: $($bcMap[$item])  ->  New qty: $($newMap[$item])   [CHANGED]"
+            }
+        } else {
+            $diff += "  $item   BC qty: $($bcMap[$item])  ->  removed in new PO   [REMOVED]"
+        }
+    }
+    foreach ($item in ($newMap.Keys | Sort-Object)) {
+        if (-not $bcMap.ContainsKey($item)) {
+            $diff += "  $item   (not in BC)  ->  New qty: $($newMap[$item])   [ADDED]"
+        }
+    }
+    return $diff
+}
+
+# ---------------------------------------------------------------------------
 # BC item catalogue (cached per environment, used by text-mode extraction)
 # ---------------------------------------------------------------------------
 function Get-BcItemNumbers {

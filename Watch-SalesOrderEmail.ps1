@@ -64,6 +64,27 @@ function Get-PdfAttachmentBytes {
 }
 
 # ---------------------------------------------------------------------------
+# Send a plain-text notification email to supcom@montandor.com via Graph API
+# ---------------------------------------------------------------------------
+function Send-NotificationEmail {
+    param([string]$Subject, [string]$Body)
+    $payload = @{
+        message = @{
+            subject      = $Subject
+            body         = @{ contentType = 'Text'; content = $Body }
+            toRecipients = @(@{ emailAddress = @{ address = $supcom } })
+        }
+    } | ConvertTo-Json -Depth 5
+    try {
+        Invoke-RestMethod -Method Post -Uri "$graphBase/sendMail" `
+            -Headers ($graphHeader + @{ 'Content-Type' = 'application/json' }) `
+            -Body $payload | Out-Null
+    } catch {
+        Write-Host "    [WARN] Notification email failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 $today = (Get-Date -Hour 0 -Minute 0 -Second 0).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -129,6 +150,20 @@ foreach ($msg in $msgs.value) {
                 if ($candidates.Count -eq 0) {
                     Write-Host "    [SKIP] No BC ship-to for postcode $($data.ShipToPostCode)" -ForegroundColor Yellow
                     $skipOrder = $true; $emailOk = $false
+                    Send-NotificationEmail `
+                        -Subject "[Sales Order] Action required — $($tpl.clientName) ref $($data.OrderRef)" `
+                        -Body @"
+A purchase order could not be posted to BC because the delivery postcode is not registered as a ship-to address.
+
+Client:    $($tpl.clientName)
+Order ref: $($data.OrderRef)
+From:      $senderEmail
+Email:     $($msg.subject)
+Postcode:  $($data.ShipToPostCode)
+
+Action: Add postcode $($data.ShipToPostCode) as a ship-to address for $($tpl.clientName) in BC.
+The order will be picked up automatically on the next watcher run.
+"@
                 } elseif ($candidates.Count -eq 1) {
                     $shipToCode = $candidates[0].code
                     Write-Host "    Ship-to: $shipToCode — $($candidates[0].displayName)" -ForegroundColor Green
@@ -136,6 +171,20 @@ foreach ($msg in $msgs.value) {
                     $codes = ($candidates | ForEach-Object { $_.code }) -join ', '
                     Write-Host "    [SKIP] Ambiguous postcode $($data.ShipToPostCode): $codes" -ForegroundColor Yellow
                     $skipOrder = $true; $emailOk = $false
+                    Send-NotificationEmail `
+                        -Subject "[Sales Order] Action required — $($tpl.clientName) ref $($data.OrderRef)" `
+                        -Body @"
+A purchase order could not be posted to BC because multiple ship-to addresses match the delivery postcode.
+
+Client:    $($tpl.clientName)
+Order ref: $($data.OrderRef)
+From:      $senderEmail
+Email:     $($msg.subject)
+Postcode:  $($data.ShipToPostCode)
+Matches:   $codes
+
+Action: The postcode is ambiguous — please post this order manually in BC.
+"@
                 }
             }
 
@@ -150,15 +199,52 @@ foreach ($msg in $msgs.value) {
             Write-Host "    Lines     : $($data.Lines.Count)"
 
             if ($alreadyExists) {
-                Write-Host "    [SKIP] Order ref $($data.OrderRef) already exists in BC." -ForegroundColor Yellow
+                $bcLines  = Get-BcOrderLines -CustomerNumber $tpl.customerNumber -OrderRef $data.OrderRef -Environment $tpl.environment
+                $lineDiff = if ($bcLines) { Compare-OrderLines -NewLines $data.Lines -BcLines $bcLines } else { @() }
+
+                if ($lineDiff.Count -gt 0) {
+                    # Same order ref, different lines — customer likely modified their PO
+                    Write-Host "    [NOTIFY] Modified PO detected — $($lineDiff.Count) line difference(s)." -ForegroundColor Yellow
+                    Send-NotificationEmail `
+                        -Subject "[Sales Order] Modified PO — $($tpl.clientName) ref $($data.OrderRef)" `
+                        -Body @"
+A purchase order has been received that matches an existing BC order but with different line items.
+The BC order has NOT been updated automatically. Please review and update manually if needed.
+
+Client:    $($tpl.clientName)
+Order ref: $($data.OrderRef)
+From:      $senderEmail
+Email:     $($msg.subject)
+
+Changes vs existing BC order:
+$($lineDiff -join "`n")
+"@
+                } else {
+                    # True duplicate (same lines) — silent regardless of email age
+                    Write-Host "    [SKIP] Order ref $($data.OrderRef) already in BC, lines unchanged." -ForegroundColor Yellow
+                }
             } elseif (-not $skipOrder) {
                 $bcNo = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode
                 Write-Host "    -> BC $bcNo posted to $($tpl.environment)" -ForegroundColor Green
                 $ordersPosted++
             }
         } catch {
-            Write-Host "    [ERROR] $($_.Exception.Message)" -ForegroundColor Red
+            $errMsg = $_.Exception.Message
+            Write-Host "    [ERROR] $errMsg" -ForegroundColor Red
             $emailOk = $false
+            Send-NotificationEmail `
+                -Subject "[Sales Order] Error — $($tpl.clientName) $($att.name)" `
+                -Body @"
+An error occurred while processing a purchase order PDF. The order has NOT been posted to BC.
+
+Client:    $($tpl.clientName)
+Email:     $($msg.subject)
+From:      $senderEmail
+File:      $($att.name)
+Error:     $errMsg
+
+Please review and process this order manually if needed.
+"@
         }
     }
 
