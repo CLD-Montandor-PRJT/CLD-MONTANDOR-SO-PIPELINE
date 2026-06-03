@@ -67,12 +67,16 @@ function Get-PdfAttachmentBytes {
 # Send a plain-text notification email to supcom@montandor.com via Graph API
 # ---------------------------------------------------------------------------
 function Send-NotificationEmail {
-    param([string]$Subject, [string]$Body)
+    param([string]$Subject, [string]$Body, [string[]]$AlsoNotify = @())
+    $recipients = @(@{ emailAddress = @{ address = $supcom } })
+    foreach ($addr in $AlsoNotify) {
+        $recipients += @{ emailAddress = @{ address = $addr } }
+    }
     $payload = @{
         message = @{
             subject      = $Subject
             body         = @{ contentType = 'Text'; content = $Body }
-            toRecipients = @(@{ emailAddress = @{ address = $supcom } })
+            toRecipients = $recipients
         }
     } | ConvertTo-Json -Depth 5
     try {
@@ -234,6 +238,7 @@ $($lineDiff -join "`n")
             $emailOk = $false
             Send-NotificationEmail `
                 -Subject "[Sales Order] Error — $($tpl.clientName) $($att.name)" `
+                -AlsoNotify @('x.planchette@montandor.com') `
                 -Body @"
 An error occurred while processing a purchase order PDF. The order has NOT been posted to BC.
 
