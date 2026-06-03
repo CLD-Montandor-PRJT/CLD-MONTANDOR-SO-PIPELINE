@@ -122,12 +122,21 @@ function Get-ApiError {
 function Test-BcOrderExists {
     param([string]$CustomerNumber, [string]$OrderRef, [string]$Environment)
     if (-not $OrderRef) { return $false }
-    $base   = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/api/v2.0/companies($companyId)"
-    $filter = "customerNumber eq '$CustomerNumber' and externalDocumentNumber eq '$OrderRef'"
-    $r1 = Invoke-RestMethod -Uri "$base/salesOrders?`$filter=$filter&`$select=number&`$top=1" -Headers $authHeader
+    $odata = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/ODataV4/Company('Montandor_Andorra')"
+
+    # Open + Released orders (Document_Type=Order covers both)
+    $f1 = "Sell_to_Customer_No eq '$CustomerNumber' and Your_Reference eq '$OrderRef' and Document_Type eq 'Order'"
+    $r1 = Invoke-RestMethod -Uri "$odata/SalesOrder?`$filter=$f1&`$select=No&`$top=1" -Headers $authHeader
     if (@($r1.value).Count -gt 0) { return $true }
-    $r2 = Invoke-RestMethod -Uri "$base/postedSalesInvoices?`$filter=$filter&`$select=number&`$top=1" -Headers $authHeader
-    return @($r2.value).Count -gt 0
+
+    # Posted invoices — only if web service is published in BC
+    try {
+        $f2 = "Sell_to_Customer_No eq '$CustomerNumber' and Your_Reference eq '$OrderRef'"
+        $r2 = Invoke-RestMethod -Uri "$odata/PostedSalesInvoice?`$filter=$f2&`$select=No&`$top=1" -Headers $authHeader
+        if (@($r2.value).Count -gt 0) { return $true }
+    } catch { }
+
+    return $false
 }
 
 # ---------------------------------------------------------------------------
@@ -431,10 +440,8 @@ function Submit-SalesOrder {
     # Step 1: POST sales order header
     $order = $null
     try {
-        $postBody = @{ customerNumber = $Template.customerNumber; orderDate = $OrderData.OrderDate }
-        if ($OrderData.OrderRef) { $postBody['externalDocumentNumber'] = $OrderData.OrderRef }
         $order   = Invoke-RestMethod -Method Post -Uri "$apiBase/salesOrders" -Headers $jsonHeader `
-            -Body ($postBody | ConvertTo-Json)
+            -Body (@{ customerNumber = $Template.customerNumber; orderDate = $OrderData.OrderDate } | ConvertTo-Json)
         Write-Host "    [OK] Order header created: $($order.number)" -ForegroundColor Green
     } catch {
         throw "POST sales order header failed: $(Get-ApiError $_)"
