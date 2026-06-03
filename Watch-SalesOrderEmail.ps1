@@ -78,9 +78,11 @@ function Set-EmailRead {
 # Main
 # ---------------------------------------------------------------------------
 $today = (Get-Date -Hour 0 -Minute 0 -Second 0).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-Write-Host "`n[WATCH] Scanning $supcom — unread emails with attachments since $today" -ForegroundColor Cyan
+Write-Host "`n[WATCH] Scanning $supcom — all emails with attachments since $today" -ForegroundColor Cyan
 
-$filter = "isRead eq false and hasAttachments eq true and receivedDateTime ge '$today'"
+# No isRead filter — a colleague reading an email before the script runs should not prevent
+# the order from being created. Deduplication (Your_Reference check) prevents double-posting.
+$filter = "hasAttachments eq true and receivedDateTime ge '$today'"
 $msgs   = Invoke-RestMethod `
     -Uri "$graphBase/mailFolders/inbox/messages?`$filter=$filter&`$select=id,subject,from,receivedDateTime,body&`$orderby=receivedDateTime asc&`$top=50" `
     -Headers $graphHeader
