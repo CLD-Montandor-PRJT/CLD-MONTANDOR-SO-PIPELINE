@@ -14,14 +14,15 @@
 #>
 param(
     [switch]$Execute,
-    [string]$ClientFolder = ''
+    [string]$ClientFolder = '',
+    [switch]$FunctionsOnly   # dot-source mode: load functions + tokens, skip main loop
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$DryRun = -not $Execute
-$rootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$DryRun  = -not $Execute
+$rootDir = $PSScriptRoot
 $dllDir  = "$rootDir\lib\dlls"
 
 # ---------------------------------------------------------------------------
@@ -523,6 +524,8 @@ function Submit-SalesOrder {
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
+if ($FunctionsOnly) { return }   # dot-sourced by Watch-SalesOrderEmail.ps1 — stop here
+
 if ($DryRun) { Write-Host "`n*** DRY RUN — no BC writes ***" -ForegroundColor Yellow }
 
 $clientDirs = Get-ChildItem $rootDir -Directory |
