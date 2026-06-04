@@ -200,9 +200,23 @@ Write-Host "`n[WATCH] Scanning $supcom — all emails with attachments since $to
 # No isRead filter — a colleague reading an email before the script runs should not prevent
 # the order from being created. Deduplication (Your_Reference check) prevents double-posting.
 $filter = "hasAttachments eq true and receivedDateTime ge $today"
-$msgs   = Invoke-RestMethod `
-    -Uri "$graphBase/mailFolders/inbox/messages?`$filter=$filter&`$select=id,subject,from,receivedDateTime,body&`$top=50" `
-    -Headers $graphHeader
+try {
+    $msgs = Invoke-RestMethod `
+        -Uri "$graphBase/mailFolders/inbox/messages?`$filter=$filter&`$select=id,subject,from,receivedDateTime,body&`$top=50" `
+        -Headers $graphHeader
+} catch {
+    $errMsg   = $_.Exception.Message
+    $errType  = $_.Exception.GetType().Name
+    $errLine  = if ($_.InvocationInfo.Line) { $_.InvocationInfo.Line } else { '' }
+    $errStack = if ($_.ScriptStackTrace)    { $_.ScriptStackTrace }    else { '' }
+    Write-Host "[ERROR] Failed to fetch inbox: $errMsg" -ForegroundColor Red
+    Send-NotificationEmail `
+        -Subject     "[Sales Order] Watcher failed — could not read inbox" `
+        -AlsoNotify  @('x.planchette@montandor.com') `
+        -Body        (Build-ProcessingErrorHtml -ClientName 'Sales Order Watcher' -SenderEmail 'N/A' -EmailSubject 'N/A' -FileName 'Watch-SalesOrderEmail.ps1' -ErrorMessage $errMsg -ExceptionType $errType -FailingLine $errLine -StackTrace $errStack) `
+        -ContentType 'HTML'
+    exit 1
+}
 
 Write-Host "Found $($msgs.value.Count) candidate email(s)." -ForegroundColor Cyan
 
