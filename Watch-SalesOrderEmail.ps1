@@ -324,7 +324,7 @@ foreach ($msg in $msgs.value) {
                     Write-Host "    [SKIP] Order ref $($data.OrderRef) already in BC, lines unchanged." -ForegroundColor Yellow
                 }
             } elseif (-not $skipOrder) {
-                $bcNo = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode
+                $bcNo = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode -PdfBytes $pdfBytes -PdfFileName $att.name
                 Write-Host "    -> BC $bcNo posted to $($tpl.environment)" -ForegroundColor Green
                 $ordersPosted++
             }

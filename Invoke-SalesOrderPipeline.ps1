@@ -492,7 +492,9 @@ function Submit-SalesOrder {
     param(
         [PSCustomObject]$OrderData,
         [PSCustomObject]$Template,
-        [string]$ShipToCode = ''
+        [string]$ShipToCode  = '',
+        [byte[]]$PdfBytes    = $null,
+        [string]$PdfFileName = ''
     )
 
     $env     = $Template.environment
@@ -616,6 +618,26 @@ function Submit-SalesOrder {
         }
     }
 
+    # Step 6: Attach PDF to the BC sales order (Factbox → Attachments → Documents)
+    if ($null -ne $PdfBytes -and $PdfBytes.Length -gt 0 -and $PdfFileName) {
+        try {
+            $attMeta = Invoke-RestMethod -Method Post `
+                -Uri "$apiBase/salesOrders($orderId)/documentAttachments" `
+                -Headers $jsonHeader `
+                -Body (@{ fileName = $PdfFileName } | ConvertTo-Json)
+            $attId  = $attMeta.id
+            $attGet = Invoke-RestMethod -Uri "$apiBase/salesOrders($orderId)/documentAttachments($attId)" `
+                -Headers $authHeader
+            Invoke-RestMethod -Method Patch `
+                -Uri "$apiBase/salesOrders($orderId)/documentAttachments($attId)/content" `
+                -Headers ($authHeader + @{ 'Content-Type' = 'application/octet-stream'; 'If-Match' = $attGet.'@odata.etag' }) `
+                -Body $PdfBytes | Out-Null
+            Write-Host "    [OK] PDF attached        : $PdfFileName" -ForegroundColor Green
+        } catch {
+            Write-Host "    [WARN] PDF attachment failed: $(Get-ApiError $_)" -ForegroundColor Yellow
+        }
+    }
+
     return $orderNo
 }
 
@@ -697,7 +719,8 @@ foreach ($dir in $clientDirs) {
                 } elseif ($skipOrder) {
                     Write-Host "    [SKIP] Order not posted — register ship-to postcode $($data.ShipToPostCode) in BC and resubmit." -ForegroundColor Yellow
                 } else {
-                    $bcNo = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode
+                    $pdfFileBytes = [System.IO.File]::ReadAllBytes($pdf.FullName)
+                    $bcNo = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode -PdfBytes $pdfFileBytes -PdfFileName $pdf.Name
                     Move-Item -Path $pdf.FullName -Destination (Join-Path $procDir $pdf.Name) -Force
                     Write-Host "    -> BC $bcNo | moved to Processed" -ForegroundColor Green
                     $processed++
