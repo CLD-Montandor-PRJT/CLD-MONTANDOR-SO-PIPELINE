@@ -517,28 +517,38 @@ function Submit-SalesOrder {
     if ($OrderData.DeliveryDate) { $odataPatch['Requested_Delivery_Date'] = $OrderData.DeliveryDate }
 
     if ($odataPatch.Count -gt 0) {
-        try {
-            $odata = Invoke-RestMethod -Method Get `
-                -Uri "$odataBase/SalesOrder(Document_Type='Order',No='$orderNo')" -Headers $authHeader
-            Invoke-RestMethod -Method Patch `
-                -Uri "$odataBase/SalesOrder(Document_Type='Order',No='$orderNo')" `
-                -Headers ($authHeader + @{ 'Content-Type' = 'application/json'; 'If-Match' = $odata.'@odata.etag' }) `
-                -Body ($odataPatch | ConvertTo-Json) | Out-Null
-            if ($OrderData.OrderRef)     { Write-Host "    [OK] Your Reference     : $($OrderData.OrderRef)" -ForegroundColor Green }
-            if ($OrderData.DeliveryDate) { Write-Host "    [OK] Requested Delivery : $($OrderData.DeliveryDate)" -ForegroundColor Green }
-        } catch {
-            $patchErr = Get-ApiError $_
-            # Roll back the order header — leaving an order with no Your_Reference in BC breaks
-            # dedup on the next run (the filter on Your_Reference won't match it) and causes duplicates.
+        $patchAttempt = 0
+        $patchDone    = $false
+        while (-not $patchDone) {
+            $patchAttempt++
             try {
-                $reGet = Invoke-RestMethod -Uri "$apiBase/salesOrders($orderId)" -Headers $authHeader
-                Invoke-RestMethod -Method Delete -Uri "$apiBase/salesOrders($orderId)" `
-                    -Headers ($authHeader + @{ 'If-Match' = $reGet.'@odata.etag' }) | Out-Null
-                Write-Host "    [CLEANUP] Order $orderNo rolled back — Your Reference PATCH failed. Will retry next run." -ForegroundColor Yellow
+                $odata = Invoke-RestMethod -Method Get `
+                    -Uri "$odataBase/SalesOrder(Document_Type='Order',No='$orderNo')" -Headers $authHeader
+                Invoke-RestMethod -Method Patch `
+                    -Uri "$odataBase/SalesOrder(Document_Type='Order',No='$orderNo')" `
+                    -Headers ($authHeader + @{ 'Content-Type' = 'application/json'; 'If-Match' = $odata.'@odata.etag' }) `
+                    -Body ($odataPatch | ConvertTo-Json) | Out-Null
+                if ($OrderData.OrderRef)     { Write-Host "    [OK] Your Reference     : $($OrderData.OrderRef)" -ForegroundColor Green }
+                if ($OrderData.DeliveryDate) { Write-Host "    [OK] Requested Delivery : $($OrderData.DeliveryDate)" -ForegroundColor Green }
+                $patchDone = $true
             } catch {
-                Write-Host "    [ERROR] Rollback DELETE of $orderNo also failed: $(Get-ApiError $_)" -ForegroundColor Red
+                if ($patchAttempt -lt 3) {
+                    Write-Host "    [RETRY $patchAttempt/3] Your Reference PATCH failed — retrying in 5s: $(Get-ApiError $_)" -ForegroundColor Yellow
+                    Start-Sleep -Seconds 5
+                } else {
+                    $patchErr = Get-ApiError $_
+                    # All 3 attempts failed — roll back the order header so dedup works on the next watcher run.
+                    try {
+                        $reGet = Invoke-RestMethod -Uri "$apiBase/salesOrders($orderId)" -Headers $authHeader
+                        Invoke-RestMethod -Method Delete -Uri "$apiBase/salesOrders($orderId)" `
+                            -Headers ($authHeader + @{ 'If-Match' = $reGet.'@odata.etag' }) | Out-Null
+                        Write-Host "    [CLEANUP] Order $orderNo rolled back after 3 failed PATCH attempts." -ForegroundColor Yellow
+                    } catch {
+                        Write-Host "    [ERROR] Rollback DELETE of $orderNo also failed: $(Get-ApiError $_)" -ForegroundColor Red
+                    }
+                    throw "OData PATCH for Your_Reference/DeliveryDate failed after 3 attempts: $patchErr"
+                }
             }
-            throw "OData PATCH for Your_Reference/DeliveryDate failed: $patchErr"
         }
     }
 
