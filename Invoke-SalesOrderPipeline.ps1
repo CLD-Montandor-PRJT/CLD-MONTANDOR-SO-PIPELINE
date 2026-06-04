@@ -580,6 +580,18 @@ function Submit-SalesOrder {
         Write-Host "    $lineErrors line(s) failed — order $orderNo is open in BC, review manually." -ForegroundColor Yellow
     }
 
+    # Step 5: POST order comment (if fixedComment is set in template)
+    if ($Template.PSObject.Properties['fixedComment'] -and $Template.fixedComment) {
+        try {
+            $pipelineBase = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$env/api/montandor/pipeline/v1.0/companies($companyId)"
+            Invoke-RestMethod -Method Post -Uri "$pipelineBase/salesOrderComments" -Headers $jsonHeader `
+                -Body (@{ documentNo = $orderNo; comment = $Template.fixedComment } | ConvertTo-Json) | Out-Null
+            Write-Host "    [OK] Comment            : $($Template.fixedComment)" -ForegroundColor Green
+        } catch {
+            Write-Host "    [WARN] Comment POST failed: $(Get-ApiError $_)" -ForegroundColor Yellow
+        }
+    }
+
     return $orderNo
 }
 

@@ -2,6 +2,7 @@
   "clientName": "In Situ",
   "customerNumber": "C0000065",
   "environment": "Production",
+  "fixedComment": "RDV à rdv.reception-ins@matferbourgeat.com",
   "orderRefXRange": [240, 290],
   "orderRefYRange": [620, 635],
   "orderRefPattern": "^\\d{4,6}$",
