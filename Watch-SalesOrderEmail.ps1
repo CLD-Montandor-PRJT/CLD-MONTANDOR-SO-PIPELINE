@@ -17,6 +17,7 @@ $ErrorActionPreference = 'Stop'
 
 # Load all pipeline functions, DLLs, and tokens (skips the main folder-scan loop)
 . (Join-Path $PSScriptRoot 'Invoke-SalesOrderPipeline.ps1') -FunctionsOnly
+$FunctionsOnly = $false   # reset scope bleed — pipeline switch sets this to $true in dot-source scope
 
 $supcom    = 'supcom@montandor.com'
 $graphBase = "https://graph.microsoft.com/v1.0/users/$supcom"
