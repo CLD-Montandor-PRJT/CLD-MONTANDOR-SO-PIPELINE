@@ -628,8 +628,8 @@ function Submit-SalesOrder {
             $attId  = $attMeta.id
             $attGet = Invoke-RestMethod -Uri "$apiBase/salesOrders($orderId)/documentAttachments($attId)" `
                 -Headers $authHeader
-            Invoke-RestMethod -Method Patch `
-                -Uri "$apiBase/salesOrders($orderId)/documentAttachments($attId)/content" `
+            Invoke-RestMethod -Method Put `
+                -Uri "$apiBase/salesOrders($orderId)/documentAttachments($attId)/attachmentContent" `
                 -Headers ($authHeader + @{ 'Content-Type' = 'application/octet-stream'; 'If-Match' = $attGet.'@odata.etag' }) `
                 -Body $PdfBytes | Out-Null
             Write-Host "    [OK] PDF attached        : $PdfFileName" -ForegroundColor Green
