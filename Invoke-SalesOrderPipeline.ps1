@@ -584,7 +584,8 @@ function Submit-SalesOrder {
     }
 
     # Step 4: POST sales order lines
-    $lineErrors = 0
+    $lineErrors  = 0
+    $failedLines = [System.Collections.Generic.List[string]]::new()
     foreach ($line in $OrderData.Lines) {
         try {
             $result = Invoke-RestMethod -Method Post `
@@ -592,13 +593,15 @@ function Submit-SalesOrder {
                 -Body (@{ lineType = 'Item'; lineObjectNumber = $line.ItemNumber; quantity = $line.Quantity } | ConvertTo-Json)
             Write-Host ("    [OK] {0,-22} qty {1,6}  -> EUR {2}" -f $line.ItemNumber, $line.Quantity, $result.unitPrice) -ForegroundColor Green
         } catch {
-            Write-Host ("    [ERROR] Line {0} qty {1}: {2}" -f $line.ItemNumber, $line.Quantity, (Get-ApiError $_)) -ForegroundColor Red
+            $lineErr = Get-ApiError $_
+            Write-Host ("    [ERROR] Line {0} qty {1}: {2}" -f $line.ItemNumber, $line.Quantity, $lineErr) -ForegroundColor Red
+            $failedLines.Add("$($line.ItemNumber)  qty $($line.Quantity)  —  $lineErr")
             $lineErrors++
         }
     }
 
     if ($lineErrors -gt 0) {
-        Write-Host "    $lineErrors line(s) failed — order $orderNo is open in BC, review manually." -ForegroundColor Yellow
+        throw "Order $orderNo posted to BC but $lineErrors line(s) failed to add. Review and add missing lines manually in BC:`n$($failedLines -join "`n")"
     }
 
     # Step 5: POST order comment (if fixedComment is set in template)
