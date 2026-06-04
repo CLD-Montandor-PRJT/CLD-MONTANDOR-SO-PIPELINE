@@ -283,27 +283,31 @@ function Get-PdfOrderData {
             $deliveryDateBC = $parsed.ToString('yyyy-MM-dd')
         }
 
-        # Item lines: BC catalogue scan + optional rename map
-        $searchList = [System.Collections.Generic.Dictionary[string,string]]::new()
+        # Item lines: single pass over PDF text in document order to preserve PDF line sequence
+        $itemLookup = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($itemNo in $BcItemNumbers) {
-            if (-not $searchList.ContainsKey($itemNo)) { $searchList[$itemNo] = $itemNo }
+            if (-not $itemLookup.ContainsKey($itemNo)) { $itemLookup[$itemNo] = $itemNo }
         }
         if (Test-Path $mapPath) {
             $renames = Get-Content $mapPath | ConvertFrom-Json
             foreach ($prop in $renames.PSObject.Properties) {
-                $searchList[$prop.Name] = $prop.Value
-                if ($prop.Name -ne $prop.Value -and $searchList.ContainsKey($prop.Value)) {
-                    $searchList.Remove($prop.Value)
+                $itemLookup[$prop.Name] = $prop.Value
+                if ($prop.Name -ne $prop.Value -and $itemLookup.ContainsKey($prop.Value)) {
+                    $itemLookup.Remove($prop.Value)
                 }
             }
         }
-        $lines = @()
-        foreach ($searchKey in $searchList.Keys) {
-            $pattern = '(?<![A-Z0-9\-])' + [regex]::Escape($searchKey) + '\s*(\d+,\d{2})'
-            if ($allText -match $pattern) {
-                $lines += [PSCustomObject]@{
-                    ItemNumber = $searchList[$searchKey]
-                    Quantity   = [double]($Matches[1] -replace ',', '.')
+        $lines     = @()
+        $seenItems = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($m in [regex]::Matches($allText, '(?<![A-Z0-9\-])([A-Z][A-Z0-9\-]{2,})\s*(\d+,\d{2})')) {
+            $code = $m.Groups[1].Value
+            if ($itemLookup.ContainsKey($code)) {
+                $mapped = $itemLookup[$code]
+                if ($seenItems.Add($mapped)) {
+                    $lines += [PSCustomObject]@{
+                        ItemNumber = $mapped
+                        Quantity   = [double]($m.Groups[2].Value -replace ',', '.')
+                    }
                 }
             }
         }
