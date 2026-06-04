@@ -6,6 +6,5 @@
   "orderNumberRegex": "COMMANDENUMERO:(\\d+)",
   "dateRegex": "(\\d{2}/\\d{2}/\\d{4})",
   "dateInputFormat": "dd/MM/yyyy",
-  "deliveryDateRegex": "DATEDELIVRAISONSOUHAITEE\\s*(\\d{2}/\\d{2}/\\d{4})",
-  "deliveryPostCodeRegex": "MONTANDORANDORRAS\\.L\\.U\\s+(?:VALROSECS90023\\s+)?(\\d{5})"
+"deliveryPostCodeRegex": "MONTANDORANDORRAS\\.L\\.U\\s+(?:VALROSECS90023\\s+)?(\\d{5})"
 }
