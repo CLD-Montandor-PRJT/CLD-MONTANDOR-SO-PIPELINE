@@ -155,14 +155,22 @@ function Get-BcShipToCode {
 # ---------------------------------------------------------------------------
 function Get-BcOrderLines {
     param([string]$CustomerNumber, [string]$OrderRef, [string]$Environment)
+    $odata   = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/ODataV4/Company('Montandor_Andorra')"
     $apiBase = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/api/v2.0/companies($companyId)"
     try {
-        $orders = Invoke-RestMethod `
-            -Uri "$apiBase/salesOrders?`$filter=customerNumber eq '$CustomerNumber' and yourReference eq '$OrderRef'&`$select=id" `
-            -Headers $authHeader
-        if (@($orders.value).Count -eq 0) { return $null }  # posted invoice — no open order to compare
-        $orderId    = $orders.value[0].id
-        $linesResp  = Invoke-RestMethod `
+        # Step 1: use OData to find the BC order No (yourReference not filterable in REST API v2.0)
+        $f  = "Sell_to_Customer_No eq '$CustomerNumber' and Your_Reference eq '$OrderRef' and Document_Type eq 'Order'"
+        $r  = Invoke-RestMethod -Uri "$odata/SalesOrder?`$filter=$f&`$select=No&`$top=1" -Headers $authHeader
+        if (@($r.value).Count -eq 0) { return $null }  # posted invoice or not found
+        $bcNo = $r.value[0].No
+
+        # Step 2: get systemId via REST API v2.0 (needed for lines sub-endpoint)
+        $orders = Invoke-RestMethod -Uri "$apiBase/salesOrders?`$filter=number eq '$bcNo'&`$select=id" -Headers $authHeader
+        if (@($orders.value).Count -eq 0) { return $null }
+        $orderId = $orders.value[0].id
+
+        # Step 3: fetch item lines
+        $linesResp = Invoke-RestMethod `
             -Uri "$apiBase/salesOrders($orderId)/salesOrderLines?`$filter=lineType eq 'Item'&`$select=lineObjectNumber,quantity" `
             -Headers $authHeader
         return @($linesResp.value | ForEach-Object {

@@ -194,6 +194,8 @@ function Build-ModifiedOrderHtml {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+if ($FunctionsOnly) { return }   # dot-source mode — load functions only, skip main block
+
 $today = (Get-Date -Hour 0 -Minute 0 -Second 0).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 Write-Host "`n[WATCH] Scanning $supcom — all emails with attachments since $today" -ForegroundColor Cyan
 
@@ -300,7 +302,7 @@ foreach ($msg in $msgs.value) {
             Write-Host "    Lines     : $($data.Lines.Count)"
 
             if ($alreadyExists) {
-                $bcLines  = Get-BcOrderLines -CustomerNumber $tpl.customerNumber -OrderRef $data.OrderRef -Environment $tpl.environment
+                $bcLines  = @(Get-BcOrderLines -CustomerNumber $tpl.customerNumber -OrderRef $data.OrderRef -Environment $tpl.environment)
                 $lineDiff = @(if ($bcLines) { Compare-OrderLines -NewLines $data.Lines -BcLines $bcLines } else { @() })
 
                 if ($lineDiff.Count -gt 0) {
