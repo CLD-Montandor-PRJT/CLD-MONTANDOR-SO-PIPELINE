@@ -634,7 +634,22 @@ function Submit-SalesOrder {
                 -Body $PdfBytes | Out-Null
             Write-Host "    [OK] PDF attached        : $PdfFileName" -ForegroundColor Green
         } catch {
-            Write-Host "    [WARN] PDF attachment failed: $(Get-ApiError $_)" -ForegroundColor Yellow
+            $pdfErr = Get-ApiError $_
+            Write-Host "    [WARN] PDF attachment failed: $pdfErr" -ForegroundColor Yellow
+            # Notify supcom + x.planchette — order is in BC but PDF must be attached manually
+            if (Get-Command Send-NotificationEmail -ErrorAction SilentlyContinue) {
+                $pdfBody = Build-HtmlShell -Title 'PDF Not Attached' `
+                    -Subtitle "Order $orderNo was posted to BC but the source PDF could not be attached automatically." `
+                    -Body (
+                        (Build-InfoBox ([ordered]@{ 'Order' = $orderNo; 'Client' = $Template.clientName; 'File' = $PdfFileName })) +
+                        (Build-AlertBox "Please attach <strong>$PdfFileName</strong> manually in BC: open order <strong>$orderNo</strong> &rarr; Factbox &rarr; Attachments &rarr; Documents.<br><br><strong>Error:</strong> $([System.Net.WebUtility]::HtmlEncode($pdfErr))")
+                    )
+                Send-NotificationEmail `
+                    -Subject     "[Sales Order] PDF not attached — order $orderNo" `
+                    -AlsoNotify  @('x.planchette@montandor.com') `
+                    -Body        $pdfBody `
+                    -ContentType 'HTML'
+            }
         }
     }
 
