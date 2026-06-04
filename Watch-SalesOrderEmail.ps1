@@ -301,7 +301,7 @@ foreach ($msg in $msgs.value) {
 
             if ($alreadyExists) {
                 $bcLines  = Get-BcOrderLines -CustomerNumber $tpl.customerNumber -OrderRef $data.OrderRef -Environment $tpl.environment
-                $lineDiff = if ($bcLines) { Compare-OrderLines -NewLines $data.Lines -BcLines $bcLines } else { @() }
+                $lineDiff = @(if ($bcLines) { Compare-OrderLines -NewLines $data.Lines -BcLines $bcLines } else { @() })
 
                 if ($lineDiff.Count -gt 0) {
                     # Same order ref, different lines — customer likely modified their PO
