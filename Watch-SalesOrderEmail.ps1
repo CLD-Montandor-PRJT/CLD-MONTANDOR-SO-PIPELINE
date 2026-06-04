@@ -225,6 +225,7 @@ Write-Host "Found $($msgs.value.Count) candidate email(s)." -ForegroundColor Cya
 
 $ordersPosted = 0
 $skipped      = 0
+$seenRefs     = [System.Collections.Generic.HashSet[string]]::new()   # in-run dedup guard
 
 foreach ($msg in $msgs.value) {
     $senderEmail = $msg.from.emailAddress.address
@@ -292,11 +293,17 @@ foreach ($msg in $msgs.value) {
                 }
             }
 
-            # Deduplication
+            # Deduplication — in-memory guard first (same run), then BC query
+            $refKey        = "$($tpl.customerNumber)|$($data.OrderRef)"
             $alreadyExists = $false
             if ($data.OrderRef) {
-                $alreadyExists = Test-BcOrderExists -CustomerNumber $tpl.customerNumber `
-                    -OrderRef $data.OrderRef -Environment $tpl.environment
+                if ($seenRefs.Contains($refKey)) {
+                    $alreadyExists = $true
+                    Write-Host "    [SKIP] $($data.OrderRef) already posted this run — skipping." -ForegroundColor Yellow
+                } else {
+                    $alreadyExists = Test-BcOrderExists -CustomerNumber $tpl.customerNumber `
+                        -OrderRef $data.OrderRef -Environment $tpl.environment
+                }
             }
 
             Write-Host "    Order ref : $($data.OrderRef)"
@@ -325,6 +332,7 @@ foreach ($msg in $msgs.value) {
                 }
             } elseif (-not $skipOrder) {
                 $bcNo = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode -PdfBytes $pdfBytes -PdfFileName $att.name
+                $seenRefs.Add($refKey) | Out-Null
                 Write-Host "    -> BC $bcNo posted to $($tpl.environment)" -ForegroundColor Green
                 $ordersPosted++
             }
