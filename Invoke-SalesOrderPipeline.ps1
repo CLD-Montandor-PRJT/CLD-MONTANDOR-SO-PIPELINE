@@ -527,7 +527,18 @@ function Submit-SalesOrder {
             if ($OrderData.OrderRef)     { Write-Host "    [OK] Your Reference     : $($OrderData.OrderRef)" -ForegroundColor Green }
             if ($OrderData.DeliveryDate) { Write-Host "    [OK] Requested Delivery : $($OrderData.DeliveryDate)" -ForegroundColor Green }
         } catch {
-            Write-Host "    [WARN] OData PATCH failed (Your Reference / Delivery Date): $(Get-ApiError $_)" -ForegroundColor Yellow
+            $patchErr = Get-ApiError $_
+            # Roll back the order header — leaving an order with no Your_Reference in BC breaks
+            # dedup on the next run (the filter on Your_Reference won't match it) and causes duplicates.
+            try {
+                $reGet = Invoke-RestMethod -Uri "$apiBase/salesOrders($orderId)" -Headers $authHeader
+                Invoke-RestMethod -Method Delete -Uri "$apiBase/salesOrders($orderId)" `
+                    -Headers ($authHeader + @{ 'If-Match' = $reGet.'@odata.etag' }) | Out-Null
+                Write-Host "    [CLEANUP] Order $orderNo rolled back — Your Reference PATCH failed. Will retry next run." -ForegroundColor Yellow
+            } catch {
+                Write-Host "    [ERROR] Rollback DELETE of $orderNo also failed: $(Get-ApiError $_)" -ForegroundColor Red
+            }
+            throw "OData PATCH for Your_Reference/DeliveryDate failed: $patchErr"
         }
     }
 
