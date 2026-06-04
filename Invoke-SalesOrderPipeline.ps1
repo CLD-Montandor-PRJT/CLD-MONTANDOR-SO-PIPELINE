@@ -223,7 +223,8 @@ function Get-PdfOrderData {
         [string]$PdfPath     = '',
         [byte[]]$PdfBytes    = $null,
         [PSCustomObject]$Template,
-        [string[]]$BcItemNumbers = @()
+        [string[]]$BcItemNumbers = @(),
+        [string]$ClientDir   = ''
     )
 
     $pdf = if ($PdfBytes) { [UglyToad.PdfPig.PdfDocument]::Open($PdfBytes) }
@@ -258,7 +259,8 @@ function Get-PdfOrderData {
     }
 
     # Mapping path — used by both modes
-    $mapPath = Join-Path (Split-Path $PdfPath) '..\mapping.json'
+    $mapBase = if ($ClientDir) { $ClientDir } else { Split-Path $PdfPath }
+    $mapPath = Join-Path $mapBase 'mapping.json'
 
     # ---- TEXT mode --------------------------------------------------------
     if ($Template.PSObject.Properties['extractionMode'] -and $Template.extractionMode -eq 'text') {

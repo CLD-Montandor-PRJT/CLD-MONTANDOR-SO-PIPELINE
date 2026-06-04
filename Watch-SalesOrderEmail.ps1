@@ -199,9 +199,9 @@ Write-Host "`n[WATCH] Scanning $supcom — all emails with attachments since $to
 
 # No isRead filter — a colleague reading an email before the script runs should not prevent
 # the order from being created. Deduplication (Your_Reference check) prevents double-posting.
-$filter = "hasAttachments eq true and receivedDateTime ge '$today'"
+$filter = "hasAttachments eq true and receivedDateTime ge $today"
 $msgs   = Invoke-RestMethod `
-    -Uri "$graphBase/mailFolders/inbox/messages?`$filter=$filter&`$select=id,subject,from,receivedDateTime,body&`$orderby=receivedDateTime asc&`$top=50" `
+    -Uri "$graphBase/mailFolders/inbox/messages?`$filter=$filter&`$select=id,subject,from,receivedDateTime,body&`$top=50" `
     -Headers $graphHeader
 
 Write-Host "Found $($msgs.value.Count) candidate email(s)." -ForegroundColor Cyan
@@ -247,7 +247,7 @@ foreach ($msg in $msgs.value) {
             $pdfBytes = Get-PdfAttachmentBytes -MessageId $msg.id -AttachmentId $att.id
             [System.GC]::Collect()
             [System.GC]::WaitForPendingFinalizers()
-            $data = Get-PdfOrderData -PdfBytes $pdfBytes -Template $tpl -BcItemNumbers $bcItems
+            $data = Get-PdfOrderData -PdfBytes $pdfBytes -Template $tpl -BcItemNumbers $bcItems -ClientDir $clientDir
 
             # Ship-to lookup for text-mode clients
             $shipToCode = ''
