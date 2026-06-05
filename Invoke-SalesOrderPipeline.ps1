@@ -431,32 +431,36 @@ function Get-PdfOrderData {
     # Row 1 = name, last row = postcode + city, middle rows = address lines
     $shipTo = $null
     if ($hasDeliveryAddrCfg -and $addrRows.Count -ge 2) {
-        $sortedRows = $addrRows.GetEnumerator() |
-            Sort-Object { -[double]$_.Key } |
-            ForEach-Object { ($_.Value -join ' ').Trim() }
+        try {
+            $sortedRows = $addrRows.GetEnumerator() |
+                Sort-Object { -[double]$_.Key } |
+                ForEach-Object { ($_.Value -join ' ').Trim() }
 
-        $name    = $sortedRows[0]
-        $lastRow = $sortedRows[-1]
-        $midRows = if ($sortedRows.Count -gt 2) { @($sortedRows[1..($sortedRows.Count - 2)]) } else { @() }
+            $name    = $sortedRows[0]
+            $lastRow = $sortedRows[-1]
+            [array]$midRows = if ($sortedRows.Count -gt 2) { @($sortedRows[1..($sortedRows.Count - 2)]) } else { @() }
 
-        # Last row: "26500 BOURG LES VALENCE" — first token is postcode if numeric
-        $lastParts = $lastRow -split '\s+'
-        if ($lastParts[0] -match '^\d{4,6}$') {
-            $postCode = $lastParts[0]
-            $city     = ($lastParts[1..($lastParts.Length - 1)]) -join ' '
-        } else {
-            $postCode = ''; $city = $lastRow
-        }
+            # Last row: "26500 BOURG LES VALENCE" — first token is postcode if numeric
+            $lastParts = $lastRow -split '\s+'
+            if ($lastParts[0] -match '^\d{4,6}$') {
+                $postCode = $lastParts[0]
+                $city     = ($lastParts[1..($lastParts.Length - 1)]) -join ' '
+            } else {
+                $postCode = ''; $city = $lastRow
+            }
 
-        $country = if ($Template.PSObject.Properties['shipToCountry']) { $Template.shipToCountry } else { '' }
+            $country = if ($Template.PSObject.Properties['shipToCountry']) { $Template.shipToCountry } else { '' }
 
-        $shipTo = [PSCustomObject]@{
-            name         = $name
-            addressLine1 = if ($midRows.Count -ge 1) { $midRows[0] } else { '' }
-            addressLine2 = if ($midRows.Count -ge 2) { $midRows[1] } else { '' }
-            city         = $city
-            postCode     = $postCode
-            country      = $country
+            $shipTo = [PSCustomObject]@{
+                name         = $name
+                addressLine1 = if ($midRows.Count -ge 1) { $midRows[0] } else { '' }
+                addressLine2 = if ($midRows.Count -ge 2) { $midRows[1] } else { '' }
+                city         = $city
+                postCode     = $postCode
+                country      = $country
+            }
+        } catch {
+            $shipTo = $null   # unexpected PDF layout — continue without ship-to; dedup check still runs
         }
     }
 
