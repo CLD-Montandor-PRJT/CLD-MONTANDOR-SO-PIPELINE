@@ -332,6 +332,11 @@ foreach ($msg in $msgs.value) {
             Write-Host "    Order ref : $($data.OrderRef)"
             Write-Host "    Lines     : $($data.Lines.Count)"
 
+            if (-not $data.OrderRef) {
+                Write-Host "    [SKIP] No order reference extracted — PDF is not a recognisable purchase order." -ForegroundColor Yellow
+                continue
+            }
+
             if ($alreadyExists) {
                 $bcLines  = @(Get-BcOrderLines -CustomerNumber $tpl.customerNumber -OrderRef $data.OrderRef -Environment $tpl.environment)
                 $lineDiff = @(if ($bcLines) { Compare-OrderLines -NewLines $data.Lines -BcLines $bcLines } else { @() })
