@@ -2,10 +2,10 @@
 .SYNOPSIS
     Watches supcom@montandor.com for purchase order emails and posts them to BC.
 .DESCRIPTION
-    Polls the inbox for unread emails with PDF attachments received today.
+    Polls the inbox for emails with PDF attachments received today.
     Routes each email to the correct client using senders.json per client folder.
     Downloads PDF bytes directly into memory — no files written to disk.
-    Marks the email as read only after a successful BC post.
+    Emails are never marked as read — deduplication via Your_Reference prevents double-posting.
     Run on a schedule via Task Scheduler (every N minutes).
 .NOTES
     Requires Mail.Read + Mail.Send on the Claude-BC-ReadOnly-Xavier app registration.
@@ -131,7 +131,8 @@ function Build-AmbiguousPostcodeHtml {
 
 function Build-ProcessingErrorHtml {
     param([string]$ClientName, [string]$SenderEmail, [string]$EmailSubject, [string]$FileName,
-          [string]$ErrorMessage, [string]$ExceptionType = '', [string]$FailingLine = '', [string]$StackTrace = '')
+          [string]$ErrorMessage, [string]$ExceptionType = '', [string]$FailingLine = '', [string]$StackTrace = '',
+          [string]$FooterNote = 'The order has <strong>not</strong> been posted to BC. Please review and process manually if needed.')
     $fields = [ordered]@{ 'Client' = $ClientName; 'From' = $SenderEmail; 'Email' = $EmailSubject; 'File' = $FileName }
     $info   = Build-InfoBox $fields
     $alert  = Build-AlertBox -Message "<strong>$ExceptionType</strong><br>$([System.Net.WebUtility]::HtmlEncode($ErrorMessage))" -Bg '#f8d7da' -Fg '#721c24' -Border '#f5c6cb'
@@ -142,7 +143,7 @@ function Build-ProcessingErrorHtml {
     if ($StackTrace) {
         $detail += "<div style='margin-bottom:12px'><p style='margin:0 0 4px;font-weight:600;font-size:12px;color:#555'>STACK TRACE</p><pre style='background:#f8f8f8;border:1px solid #ddd;border-radius:4px;padding:10px;font-size:12px;margin:0;overflow-x:auto'>$([System.Net.WebUtility]::HtmlEncode($StackTrace))</pre></div>"
     }
-    $note   = "<p style='color:#555;font-size:12px;margin:12px 0 0'>The order has <strong>not</strong> been posted to BC. Please review and process manually if needed.</p>"
+    $note   = "<p style='color:#555;font-size:12px;margin:12px 0 0'>$FooterNote</p>"
     return Build-HtmlShell -Title 'Processing Error' -Subtitle 'An error occurred while processing a purchase order PDF.' -Body "$info$alert$detail$note"
 }
 
@@ -228,7 +229,7 @@ Write-Host "`n[WATCH] Scanning $supcom — all emails with attachments since $to
 $filter = "hasAttachments eq true and receivedDateTime ge $today"
 try {
     $msgs = Invoke-RestMethod `
-        -Uri "$graphBase/mailFolders/inbox/messages?`$filter=$filter&`$select=id,subject,from,receivedDateTime,body&`$top=50" `
+        -Uri "$graphBase/mailFolders/inbox/messages?`$filter=$filter&`$select=id,subject,from,receivedDateTime,body&`$top=100" `
         -Headers $graphHeader
 } catch {
     $errMsg   = $_.Exception.Message
@@ -245,6 +246,9 @@ try {
 }
 
 Write-Host "Found $($msgs.value.Count) candidate email(s)." -ForegroundColor Cyan
+if ($msgs.value.Count -eq 100) {
+    Write-Host "[WARN] Inbox fetch hit the 100-email limit — some emails may have been missed. Review inbox manually." -ForegroundColor Yellow
+}
 
 $ordersPosted = 0
 $skipped      = 0
@@ -270,7 +274,7 @@ foreach ($msg in $msgs.value) {
     $atts    = Invoke-RestMethod `
         -Uri "$graphBase/messages/$($msg.id)/attachments?`$select=id,name,contentType,isInline,size" `
         -Headers $graphHeader
-    $pdfAtts = @($atts.value | Where-Object { -not $_.isInline -and $_.contentType -match 'pdf' })
+    $pdfAtts = @($atts.value | Where-Object { -not $_.isInline -and ($_.contentType -match 'pdf' -or $_.name -match '\.pdf$') })
 
     if ($pdfAtts.Count -eq 0) {
         Write-Host "  [SKIP] No PDF attachments in this email." -ForegroundColor Yellow
@@ -395,10 +399,18 @@ foreach ($msg in $msgs.value) {
             $errStack  = if ($_.ScriptStackTrace)           { $_.ScriptStackTrace }           else { '' }
             Write-Host "    [ERROR] $errMsg" -ForegroundColor Red
             $emailOk = $false
+            # PARTIAL: prefix means the order header IS in BC but lines failed — adjust the footer note accordingly
+            $isPartial  = $errMsg -match '^PARTIAL:'
+            $cleanMsg   = $errMsg -replace '^PARTIAL:', ''
+            $footerNote = if ($isPartial) {
+                'The order header <strong>has been posted</strong> to BC. Add the missing lines manually in BC before processing.'
+            } else {
+                'The order has <strong>not</strong> been posted to BC. Please review and process manually if needed.'
+            }
             Send-NotificationEmail `
                 -Subject     "[Sales Order] Error — $($tpl.clientName) $($att.name)" `
                 -AlsoNotify  @('x.planchette@montandor.com') `
-                -Body        (Build-ProcessingErrorHtml -ClientName $tpl.clientName -SenderEmail $senderEmail -EmailSubject $msg.subject -FileName $att.name -ErrorMessage $errMsg -ExceptionType $errType -FailingLine $errLine -StackTrace $errStack) `
+                -Body        (Build-ProcessingErrorHtml -ClientName $tpl.clientName -SenderEmail $senderEmail -EmailSubject $msg.subject -FileName $att.name -ErrorMessage $cleanMsg -ExceptionType $errType -FailingLine $errLine -StackTrace $errStack -FooterNote $footerNote) `
                 -ContentType 'HTML'
         }
     }

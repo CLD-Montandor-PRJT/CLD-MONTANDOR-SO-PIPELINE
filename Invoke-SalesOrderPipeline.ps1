@@ -123,16 +123,18 @@ function Get-ApiError {
 function Test-BcOrderExists {
     param([string]$CustomerNumber, [string]$OrderRef, [string]$Environment)
     if (-not $OrderRef) { return $false }
-    $odata = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/ODataV4/Company('Montandor_Andorra')"
+    $odata  = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/ODataV4/Company('Montandor_Andorra')"
+    $safeNo = $CustomerNumber -replace "'", "''"
+    $safeRef = $OrderRef      -replace "'", "''"
 
     # Open + Released orders (Document_Type=Order covers both)
-    $f1 = "Sell_to_Customer_No eq '$CustomerNumber' and Your_Reference eq '$OrderRef' and Document_Type eq 'Order'"
+    $f1 = "Sell_to_Customer_No eq '$safeNo' and Your_Reference eq '$safeRef' and Document_Type eq 'Order'"
     $r1 = Invoke-RestMethod -Uri "$odata/SalesOrder?`$filter=$f1&`$select=No&`$top=1" -Headers $authHeader
     if (@($r1.value).Count -gt 0) { return $true }
 
     # Posted invoices — via Order Pipeline AL extension (api/montandor/pipeline/v1.0)
     $pipelineBase = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/api/montandor/pipeline/v1.0/companies($companyId)"
-    $f2 = "sellToCustomerNo eq '$CustomerNumber' and yourReference eq '$OrderRef'"
+    $f2 = "sellToCustomerNo eq '$safeNo' and yourReference eq '$safeRef'"
     $r2 = Invoke-RestMethod -Uri "$pipelineBase/postedSalesInvoices?`$filter=$f2&`$select=no&`$top=1" -Headers $authHeader
     if (@($r2.value).Count -gt 0) { return $true }
 
@@ -144,7 +146,9 @@ function Test-BcOrderExists {
 # ---------------------------------------------------------------------------
 function Get-BcShipToCode {
     param([string]$CustomerNumber, [string]$PostCode, [string]$Environment)
-    $uri = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/api/montandor/pipeline/v1.0/companies($companyId)/shipToAddresses?`$filter=customerNumber eq '$CustomerNumber' and postCode eq '$PostCode'"
+    $safeNo   = $CustomerNumber -replace "'", "''"
+    $safePost = $PostCode       -replace "'", "''"
+    $uri = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/api/montandor/pipeline/v1.0/companies($companyId)/shipToAddresses?`$filter=customerNumber eq '$safeNo' and postCode eq '$safePost'"
     $resp = Invoke-RestMethod -Uri $uri -Headers $authHeader
     return @($resp.value)
 }
@@ -159,7 +163,9 @@ function Get-BcOrderLines {
     $apiBase = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/api/v2.0/companies($companyId)"
     try {
         # Step 1: use OData to find the BC order No (yourReference not filterable in REST API v2.0)
-        $f  = "Sell_to_Customer_No eq '$CustomerNumber' and Your_Reference eq '$OrderRef' and Document_Type eq 'Order'"
+        $safeNo  = $CustomerNumber -replace "'", "''"
+        $safeRef = $OrderRef       -replace "'", "''"
+        $f  = "Sell_to_Customer_No eq '$safeNo' and Your_Reference eq '$safeRef' and Document_Type eq 'Order'"
         $r  = Invoke-RestMethod -Uri "$odata/SalesOrder?`$filter=$f&`$select=No&`$top=1" -Headers $authHeader
         if (@($r.value).Count -eq 0) { return $null }  # posted invoice or not found
         $bcNo = $r.value[0].No
@@ -186,8 +192,10 @@ function Get-BcOrderLines {
 # ---------------------------------------------------------------------------
 function Get-BcOrderShipTo {
     param([string]$CustomerNumber, [string]$OrderRef, [string]$Environment)
-    $odata = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/ODataV4/Company('Montandor_Andorra')"
-    $f     = "Sell_to_Customer_No eq '$CustomerNumber' and Your_Reference eq '$OrderRef' and Document_Type eq 'Order'"
+    $odata   = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/ODataV4/Company('Montandor_Andorra')"
+    $safeNo  = $CustomerNumber -replace "'", "''"
+    $safeRef = $OrderRef       -replace "'", "''"
+    $f       = "Sell_to_Customer_No eq '$safeNo' and Your_Reference eq '$safeRef' and Document_Type eq 'Order'"
     try {
         $r = Invoke-RestMethod `
             -Uri "$odata/SalesOrder?`$filter=$f&`$select=No,Ship_to_Name,Ship_to_Address,Ship_to_City,Ship_to_Post_Code,Ship_to_Country,Ship_to_Code&`$top=1" `
@@ -658,7 +666,7 @@ function Submit-SalesOrder {
     }
 
     if ($lineErrors -gt 0) {
-        throw "Order $orderNo posted to BC but $lineErrors line(s) failed to add. Review and add missing lines manually in BC:`n$($failedLines -join "`n")"
+        throw "PARTIAL:Order $orderNo posted to BC but $lineErrors line(s) failed to add. Add the missing lines manually in BC:`n$($failedLines -join "`n")"
     }
 
     # Step 5: POST order comment (if fixedComment is set in template)
