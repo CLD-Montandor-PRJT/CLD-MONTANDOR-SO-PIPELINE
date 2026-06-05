@@ -323,14 +323,37 @@ function Get-PdfOrderData {
         }
         $lines     = @()
         $seenItems = [System.Collections.Generic.HashSet[string]]::new()
-        foreach ($m in [regex]::Matches($allText, '(?<![A-Z0-9\-])([A-Z][A-Z0-9\-]{2,})\s*(\d+,\d{2})')) {
-            $code = $m.Groups[1].Value
-            if ($itemLookup.ContainsKey($code)) {
+
+        if ($Template.PSObject.Properties['qtyUnit'] -and $Template.qtyUnit) {
+            # Integer+unit qty mode (e.g. GAFIC: 8PCE, 18PQT).
+            # A general pattern would greedily absorb quantity digits into the code (ELE-BL-LA12PCE
+            # becomes code=ELE-BL-LA1, qty=2). Per-code exact search avoids this entirely.
+            $unitPat  = $Template.qtyUnit
+            $codeHits = @{}
+            foreach ($code in $itemLookup.Keys) {
+                $m = [regex]::Match($allText, [regex]::Escape($code) + "(\d+)(?:$unitPat)")
+                if ($m.Success) { $codeHits[$code] = @{ Idx = $m.Index; Qty = $m.Groups[1].Value } }
+            }
+            foreach ($code in ($codeHits.Keys | Sort-Object { $codeHits[$_].Idx })) {
                 $mapped = $itemLookup[$code]
                 if ($seenItems.Add($mapped)) {
                     $lines += [PSCustomObject]@{
                         ItemNumber = $mapped
-                        Quantity   = [double]($m.Groups[2].Value -replace ',', '.')
+                        Quantity   = [double]$codeHits[$code].Qty
+                    }
+                }
+            }
+        } else {
+            # Comma-decimal qty mode (e.g. CR Distribution: 5,20) — single pass over text.
+            foreach ($m in [regex]::Matches($allText, '(?<![A-Z0-9\-])([A-Z][A-Z0-9\-]{2,})\s*(\d+,\d{2})')) {
+                $code = $m.Groups[1].Value
+                if ($itemLookup.ContainsKey($code)) {
+                    $mapped = $itemLookup[$code]
+                    if ($seenItems.Add($mapped)) {
+                        $lines += [PSCustomObject]@{
+                            ItemNumber = $mapped
+                            Quantity   = [double]($m.Groups[2].Value -replace ',', '.')
+                        }
                     }
                 }
             }
