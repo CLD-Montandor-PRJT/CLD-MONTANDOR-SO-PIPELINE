@@ -147,40 +147,57 @@ function Build-ProcessingErrorHtml {
 }
 
 function Build-ModifiedOrderHtml {
-    param([string]$ClientName, [string]$OrderRef, [string]$SenderEmail, [string]$EmailSubject, [PSCustomObject[]]$Diff)
+    param(
+        [string]$ClientName,
+        [string]$OrderRef,
+        [string]$SenderEmail,
+        [string]$EmailSubject,
+        [PSCustomObject[]]$Diff        = @(),
+        [string]$ShipToOld             = '',
+        [string]$ShipToNew             = ''
+    )
 
-    $rowColors = @{
-        Changed = @{ bg = '#fff3cd'; fg = '#856404' }
-        Added   = @{ bg = '#d4edda'; fg = '#155724' }
-        Removed = @{ bg = '#f8d7da'; fg = '#721c24' }
+    $body = "<div style='background:#f0f0f0;padding:12px 16px;border-radius:4px;font-size:13px;margin-bottom:20px;line-height:2'>
+    <strong>Client:</strong> $ClientName &nbsp;&nbsp;&nbsp;
+    <strong>Order ref:</strong> $OrderRef <br>
+    <strong>From:</strong> $SenderEmail &nbsp;&nbsp;&nbsp;
+    <strong>Email:</strong> $EmailSubject
+  </div>"
+
+    if ($ShipToOld -or $ShipToNew) {
+        $body += "<div style='margin-bottom:20px'>
+    <p style='margin:0 0 8px;font-weight:600;font-size:13px'>Delivery address changed</p>
+    <table style='border-collapse:collapse;width:100%;font-size:13px'>
+      <thead><tr>
+        <th style='padding:8px 12px;border:1px solid #ddd;text-align:left;background:#856404;color:#fff;width:50%'>In BC (current)</th>
+        <th style='padding:8px 12px;border:1px solid #ddd;text-align:left;background:#155724;color:#fff;width:50%'>In PDF (new)</th>
+      </tr></thead>
+      <tbody><tr>
+        <td style='padding:10px 12px;border:1px solid #ddd;vertical-align:top;background:#fff3cd;color:#856404'>$([System.Net.WebUtility]::HtmlEncode($ShipToOld) -replace "`n",'<br>')</td>
+        <td style='padding:10px 12px;border:1px solid #ddd;vertical-align:top;background:#d4edda;color:#155724'>$([System.Net.WebUtility]::HtmlEncode($ShipToNew) -replace "`n",'<br>')</td>
+      </tr></tbody>
+    </table></div>"
     }
 
-    $rows = ''
-    foreach ($d in ($Diff | Sort-Object Type, ItemNumber)) {
-        $c      = $rowColors[$d.Type]
-        $wasStr = if ($null -eq $d.OldQty) { '&mdash;' } else { if ($d.OldQty -eq [Math]::Floor($d.OldQty)) { [int]$d.OldQty } else { $d.OldQty } }
-        $nowStr = if ($null -eq $d.NewQty) { '&mdash;' } else { if ($d.NewQty -eq [Math]::Floor($d.NewQty)) { [int]$d.NewQty } else { $d.NewQty } }
-        $rows += "<tr style='background:$($c.bg);color:$($c.fg)'>
+    if (@($Diff).Count -gt 0) {
+        $rowColors = @{
+            Changed = @{ bg = '#fff3cd'; fg = '#856404' }
+            Added   = @{ bg = '#d4edda'; fg = '#155724' }
+            Removed = @{ bg = '#f8d7da'; fg = '#721c24' }
+        }
+        $rows = ''
+        foreach ($d in ($Diff | Sort-Object Type, ItemNumber)) {
+            $c      = $rowColors[$d.Type]
+            $wasStr = if ($null -eq $d.OldQty) { '&mdash;' } else { if ($d.OldQty -eq [Math]::Floor($d.OldQty)) { [int]$d.OldQty } else { $d.OldQty } }
+            $nowStr = if ($null -eq $d.NewQty) { '&mdash;' } else { if ($d.NewQty -eq [Math]::Floor($d.NewQty)) { [int]$d.NewQty } else { $d.NewQty } }
+            $rows  += "<tr style='background:$($c.bg);color:$($c.fg)'>
             <td style='padding:7px 12px;border:1px solid #ddd;font-weight:600'>$($d.ItemNumber)</td>
             <td style='padding:7px 12px;border:1px solid #ddd'>$($d.Type)</td>
             <td style='padding:7px 12px;border:1px solid #ddd;text-align:right'>$wasStr</td>
             <td style='padding:7px 12px;border:1px solid #ddd;text-align:right'>$nowStr</td>
         </tr>"
-    }
-
-    return "
-<html><body style='font-family:Arial,Calibri,sans-serif;font-size:13px;color:#333;max-width:700px;margin:0 auto;padding:20px'>
-  <h2 style='margin:0 0 4px'>Sales Order Pipeline &mdash; Modified Order</h2>
-  <p style='margin:0 0 16px;color:#666;font-size:12px'>The BC order has <strong>not</strong> been updated automatically. Please review and update manually if needed.</p>
-
-  <div style='background:#f0f0f0;padding:12px 16px;border-radius:4px;font-size:13px;margin-bottom:20px;line-height:2'>
-    <strong>Client:</strong> $ClientName &nbsp;&nbsp;&nbsp;
-    <strong>Order ref:</strong> $OrderRef <br>
-    <strong>From:</strong> $SenderEmail &nbsp;&nbsp;&nbsp;
-    <strong>Email:</strong> $EmailSubject
-  </div>
-
-  <table style='border-collapse:collapse;width:100%;font-size:13px'>
+        }
+        $body += "<table style='border-collapse:collapse;width:100%;font-size:13px'>
     <thead><tr>
       <th style='padding:8px 12px;border:1px solid #ddd;text-align:left;background:#343a40;color:#fff'>Item</th>
       <th style='padding:8px 12px;border:1px solid #ddd;text-align:left;background:#343a40;color:#fff'>Change</th>
@@ -188,7 +205,13 @@ function Build-ModifiedOrderHtml {
       <th style='padding:8px 12px;border:1px solid #ddd;text-align:right;background:#343a40;color:#fff'>New Qty</th>
     </tr></thead>
     <tbody>$rows</tbody>
-  </table>
+  </table>"
+    }
+
+    return "<html><body style='font-family:Arial,Calibri,sans-serif;font-size:13px;color:#333;max-width:700px;margin:0 auto;padding:20px'>
+  <h2 style='margin:0 0 4px'>Sales Order Pipeline &mdash; Modified Order</h2>
+  <p style='margin:0 0 16px;color:#666;font-size:12px'>The BC order has <strong>not</strong> been updated automatically. Please review and update manually if needed.</p>
+  $body
 </body></html>"
 }
 
@@ -313,22 +336,46 @@ foreach ($msg in $msgs.value) {
                 $bcLines  = @(Get-BcOrderLines -CustomerNumber $tpl.customerNumber -OrderRef $data.OrderRef -Environment $tpl.environment)
                 $lineDiff = @(if ($bcLines) { Compare-OrderLines -NewLines $data.Lines -BcLines $bcLines } else { @() })
 
-                if ($lineDiff.Count -gt 0) {
-                    # Same order ref, different lines — customer likely modified their PO
-                    Write-Host "    [NOTIFY] Modified PO detected — $($lineDiff.Count) line difference(s)." -ForegroundColor Yellow
+                # Ship-to comparison
+                $shipToChanged = $false
+                $shipToOldStr  = ''
+                $shipToNewStr  = ''
+                $bcShipTo = Get-BcOrderShipTo -CustomerNumber $tpl.customerNumber -OrderRef $data.OrderRef -Environment $tpl.environment
+                if ($bcShipTo -and $data.ShipTo) {
+                    # Coordinate-mode: compare full address fields
+                    $pdfKey = "$($data.ShipTo.name)|$($data.ShipTo.addressLine1)|$($data.ShipTo.postCode)|$($data.ShipTo.city)"
+                    $bcKey  = "$($bcShipTo.name)|$($bcShipTo.addressLine1)|$($bcShipTo.postCode)|$($bcShipTo.city)"
+                    if ($pdfKey.Trim() -ne $bcKey.Trim()) {
+                        $shipToChanged = $true
+                        $shipToOldStr  = "$($bcShipTo.name)`n$($bcShipTo.addressLine1)`n$($bcShipTo.postCode) $($bcShipTo.city)"
+                        $shipToNewStr  = "$($data.ShipTo.name)`n$($data.ShipTo.addressLine1)`n$($data.ShipTo.postCode) $($data.ShipTo.city)"
+                    }
+                } elseif ($bcShipTo -and $shipToCode -and $shipToCode -ne $bcShipTo.code) {
+                    # Text-mode: compare resolved ship-to code
+                    $shipToChanged = $true
+                    $shipToOldStr  = $bcShipTo.code
+                    $shipToNewStr  = $shipToCode
+                }
+
+                if ($lineDiff.Count -gt 0 -or $shipToChanged) {
+                    $changes = @()
+                    if ($lineDiff.Count -gt 0)  { $changes += "$($lineDiff.Count) line difference(s)" }
+                    if ($shipToChanged)           { $changes += "delivery address changed" }
+                    Write-Host "    [NOTIFY] Modified PO detected — $($changes -join ', ')." -ForegroundColor Yellow
                     $html = Build-ModifiedOrderHtml `
                         -ClientName   $tpl.clientName `
                         -OrderRef     $data.OrderRef `
                         -SenderEmail  $senderEmail `
                         -EmailSubject $msg.subject `
-                        -Diff         $lineDiff
+                        -Diff         $lineDiff `
+                        -ShipToOld    $shipToOldStr `
+                        -ShipToNew    $shipToNewStr
                     Send-NotificationEmail `
                         -Subject     "[Sales Order] Modified Order — $($tpl.clientName) ref $($data.OrderRef)" `
                         -Body        $html `
                         -ContentType 'HTML'
                 } else {
-                    # True duplicate (same lines) — silent regardless of email age
-                    Write-Host "    [SKIP] Order ref $($data.OrderRef) already in BC, lines unchanged." -ForegroundColor Yellow
+                    Write-Host "    [SKIP] Order ref $($data.OrderRef) already in BC, lines and address unchanged." -ForegroundColor Yellow
                 }
             } elseif (-not $skipOrder) {
                 $bcNo = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode -PdfBytes $pdfBytes -PdfFileName $att.name

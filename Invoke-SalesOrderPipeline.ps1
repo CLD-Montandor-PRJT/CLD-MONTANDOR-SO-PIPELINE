@@ -182,6 +182,30 @@ function Get-BcOrderLines {
 }
 
 # ---------------------------------------------------------------------------
+# Fetch current ship-to address from BC for an open sales order
+# ---------------------------------------------------------------------------
+function Get-BcOrderShipTo {
+    param([string]$CustomerNumber, [string]$OrderRef, [string]$Environment)
+    $odata = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/ODataV4/Company('Montandor_Andorra')"
+    $f     = "Sell_to_Customer_No eq '$CustomerNumber' and Your_Reference eq '$OrderRef' and Document_Type eq 'Order'"
+    try {
+        $r = Invoke-RestMethod `
+            -Uri "$odata/SalesOrder?`$filter=$f&`$select=No,Ship_to_Name,Ship_to_Address,Ship_to_City,Ship_to_Post_Code,Ship_to_Country,Ship_to_Code&`$top=1" `
+            -Headers $authHeader
+        if (@($r.value).Count -eq 0) { return $null }
+        $o = $r.value[0]
+        return [PSCustomObject]@{
+            name         = $o.Ship_to_Name
+            addressLine1 = $o.Ship_to_Address
+            city         = $o.Ship_to_City
+            postCode     = $o.Ship_to_Post_Code
+            country      = $o.Ship_to_Country
+            code         = $o.Ship_to_Code
+        }
+    } catch { return $null }
+}
+
+# ---------------------------------------------------------------------------
 # Compare extracted PDF lines against existing BC order lines
 # Returns array of {Type, ItemNumber, OldQty, NewQty} objects; empty = identical
 # ---------------------------------------------------------------------------
