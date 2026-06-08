@@ -90,7 +90,7 @@ function Send-NotificationEmail {
 }
 
 function Build-InfoBox {
-    param([hashtable]$Fields, [string]$Bg = '#f0f0f0')
+    param([System.Collections.IDictionary]$Fields, [string]$Bg = '#f0f0f0')
     $rows = ($Fields.GetEnumerator() | ForEach-Object {
         "<tr><td style='padding:4px 12px 4px 0;font-weight:600;white-space:nowrap;color:#555'>$($_.Key)</td><td style='padding:4px 0'>$($_.Value)</td></tr>"
     }) -join ''
@@ -113,10 +113,7 @@ function Build-HtmlShell {
 
 function Build-ShipToNotFoundHtml {
     param([string]$ClientName, [string]$OrderRef, [string]$SenderEmail, [string]$EmailSubject, [string]$PostCode)
-    $info   = Build-InfoBox ([ordered]@{ Client=''; 'Order ref'=''; From=''; Email='' })
-    # Build ordered hashtable properly
-    $fields = [ordered]@{ 'Client' = $ClientName; 'Order ref' = $OrderRef; 'From' = $SenderEmail; 'Email' = $EmailSubject; 'Postcode' = "<strong>$PostCode</strong>" }
-    $info   = Build-InfoBox $fields
+    $info   = Build-InfoBox ([ordered]@{ 'Client' = $ClientName; 'Order ref' = $OrderRef; 'From' = $SenderEmail; 'Email' = $EmailSubject; 'Postcode' = "<strong>$PostCode</strong>" })
     $alert  = Build-AlertBox "Add postcode <strong>$PostCode</strong> as a ship-to address for <strong>$ClientName</strong> in BC. The order will be picked up automatically on the next watcher run."
     return Build-HtmlShell -Title 'Delivery postcode not registered in BC' -Subtitle 'This order has not been posted and requires manual action.' -Body "$info$alert"
 }
@@ -283,7 +280,7 @@ foreach ($msg in $msgs.value) {
     }
 
     $isTextMode = $tpl.PSObject.Properties['extractionMode'] -and $tpl.extractionMode -eq 'text'
-    $bcItems    = if ($isTextMode) { Get-BcItemNumbers -Environment $tpl.environment } else { @() }
+    $bcItems    = @(if ($isTextMode) { Get-BcItemNumbers -Environment $tpl.environment })
     $emailOk    = $true
 
     foreach ($att in $pdfAtts) {
@@ -387,7 +384,7 @@ foreach ($msg in $msgs.value) {
                     Write-Host "    [SKIP] Order ref $($data.OrderRef) already in BC, lines and address unchanged." -ForegroundColor Yellow
                 }
             } elseif (-not $skipOrder) {
-                $unknownItems = if ($data.PSObject.Properties['UnknownCodes']) { @($data.UnknownCodes) } else { @() }
+                $unknownItems = @(if ($data.PSObject.Properties['UnknownCodes']) { $data.UnknownCodes })
                 if ($unknownItems.Count -gt 0) {
                     $codeList = $unknownItems -join ', '
                     Write-Host "    [STOP] $($unknownItems.Count) item(s) not in BC — order not posted: $codeList" -ForegroundColor Red
