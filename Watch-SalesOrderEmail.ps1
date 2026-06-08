@@ -339,8 +339,8 @@ foreach ($msg in $msgs.value) {
             }
 
             if ($alreadyExists) {
-                $bcLines  = @(Get-BcOrderLines -CustomerNumber $tpl.customerNumber -OrderRef $data.OrderRef -Environment $tpl.environment)
-                $lineDiff = @(if ($bcLines) { Compare-OrderLines -NewLines $data.Lines -BcLines $bcLines } else { @() })
+                $bcLines  = Get-BcOrderLines -CustomerNumber $tpl.customerNumber -OrderRef $data.OrderRef -Environment $tpl.environment
+                $lineDiff = @(if ($bcLines) { Compare-OrderLines -NewLines $data.Lines -BcLines $bcLines })
 
                 # Ship-to comparison
                 $shipToChanged = $false
