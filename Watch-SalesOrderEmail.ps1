@@ -387,10 +387,24 @@ foreach ($msg in $msgs.value) {
                     Write-Host "    [SKIP] Order ref $($data.OrderRef) already in BC, lines and address unchanged." -ForegroundColor Yellow
                 }
             } elseif (-not $skipOrder) {
-                $bcNo = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode -PdfBytes $pdfBytes -PdfFileName $att.name
-                $seenRefs.Add($refKey) | Out-Null
-                Write-Host "    -> BC $bcNo posted to $($tpl.environment)" -ForegroundColor Green
-                $ordersPosted++
+                $unknownItems = if ($data.PSObject.Properties['UnknownCodes']) { @($data.UnknownCodes) } else { @() }
+                if ($unknownItems.Count -gt 0) {
+                    $codeList = $unknownItems -join ', '
+                    Write-Host "    [STOP] $($unknownItems.Count) item(s) not in BC — order not posted: $codeList" -ForegroundColor Red
+                    $emailOk = $false
+                    $body = (Build-InfoBox ([ordered]@{ 'Client' = $tpl.clientName; 'Order ref' = $data.OrderRef; 'From' = $senderEmail; 'Email' = $msg.subject })) +
+                            (Build-AlertBox -Message "The following item code(s) were found in the PDF but are <strong>not set up in BC</strong>:<br><br><strong>$([System.Net.WebUtility]::HtmlEncode($codeList))</strong><br><br>Please create these items in BC. The order will be posted automatically on the next watcher run once all items are available." -Bg '#f8d7da' -Fg '#721c24' -Border '#f5c6cb')
+                    Send-NotificationEmail `
+                        -Subject     "[Sales Order] Unrecognised items — $($tpl.clientName) ref $($data.OrderRef)" `
+                        -AlsoNotify  @('x.planchette@montandor.com') `
+                        -Body        (Build-HtmlShell -Title 'Unrecognised Items — Order Not Posted' -Subtitle 'The order has not been posted to BC.' -Body $body) `
+                        -ContentType 'HTML'
+                } else {
+                    $bcNo = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode -PdfBytes $pdfBytes -PdfFileName $att.name
+                    $seenRefs.Add($refKey) | Out-Null
+                    Write-Host "    -> BC $bcNo posted to $($tpl.environment)" -ForegroundColor Green
+                    $ordersPosted++
+                }
             }
         } catch {
             $errMsg    = $_.Exception.Message

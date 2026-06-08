@@ -329,8 +329,9 @@ function Get-PdfOrderData {
                 }
             }
         }
-        $lines     = @()
-        $seenItems = [System.Collections.Generic.HashSet[string]]::new()
+        $lines        = @()
+        $unknownCodes = @()
+        $seenItems    = [System.Collections.Generic.HashSet[string]]::new()
 
         if ($Template.PSObject.Properties['qtyBeforeCode'] -and $Template.qtyBeforeCode) {
             # Qty-before-code mode (e.g. Aligro-Demaurex: "54x    2PI...ITEM_CODE 2 PI").
@@ -365,6 +366,20 @@ function Get-PdfOrderData {
                     }
                 }
             }
+            # Detect codes in Réf.Fourn. column not matched to BC — code followed by pack qty + unit.
+            # Two false-positive guards:
+            #   - Require hyphen in code (filters header/address text like "OFICINA 21140 AV")
+            #   - Require code is not a suffix match of a known BC code (filters "A4MC-CBA4-BR"
+            #     which is description "A4" concatenated with the known code "MC-CBA4-BR")
+            $seenUnknown = [System.Collections.Generic.HashSet[string]]::new()
+            foreach ($m in [regex]::Matches($allText, '(?<![A-Z\-])([A-Z][A-Z0-9\-]{2,})\s+\d+\s+[A-Z]{2,3}')) {
+                $code = $m.Groups[1].Value
+                if ($code -notmatch '-') { continue }
+                if (-not $codeHits.ContainsKey($code) -and $seenUnknown.Add($code)) {
+                    $isSuffix = $codeHits.Keys | Where-Object { $code.EndsWith($_, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+                    if (-not $isSuffix) { $unknownCodes += $code }
+                }
+            }
         } elseif ($Template.PSObject.Properties['qtyUnit'] -and $Template.qtyUnit) {
             # Integer+unit qty mode (e.g. GAFIC: 8PCE, 18PQT).
             # A general pattern would greedily absorb quantity digits into the code (ELE-BL-LA12PCE
@@ -384,8 +399,17 @@ function Get-PdfOrderData {
                     }
                 }
             }
+            # Detect codes in VERMES# references not matched to BC — unit suffix forces correct backtracking
+            $seenUnknown = [System.Collections.Generic.HashSet[string]]::new()
+            foreach ($m in [regex]::Matches($allText, '#([A-Z][A-Z0-9\-]+)(\d+)(?:' + $unitPat + ')')) {
+                $code = $m.Groups[1].Value
+                if (-not $codeHits.ContainsKey($code) -and $seenUnknown.Add($code)) {
+                    $unknownCodes += $code
+                }
+            }
         } else {
             # Comma-decimal qty mode (e.g. CR Distribution: 5,20) — single pass over text.
+            $seenUnknown = [System.Collections.Generic.HashSet[string]]::new()
             foreach ($m in [regex]::Matches($allText, '(?<![A-Z0-9\-])([A-Z][A-Z0-9\-]{2,})\s*(\d+,\d{2})')) {
                 $code = $m.Groups[1].Value
                 if ($itemLookup.ContainsKey($code)) {
@@ -396,6 +420,8 @@ function Get-PdfOrderData {
                             Quantity   = [double]($m.Groups[2].Value -replace ',', '.')
                         }
                     }
+                } elseif ($seenUnknown.Add($code)) {
+                    $unknownCodes += $code
                 }
             }
         }
@@ -443,6 +469,7 @@ function Get-PdfOrderData {
             ShipTo         = $shipTo
             ShipToPostCode = $extractedPostCode
             Lines          = $lines
+            UnknownCodes   = $unknownCodes
         }
     }
     # -----------------------------------------------------------------------
