@@ -1,0 +1,12 @@
+{
+  "clientName": "Aligro-Demaurex",
+  "customerNumber": "C0000054",
+  "environment": "Production",
+  "extractionMode": "text",
+  "orderNumberRegex": "Commande no\\.\\s+(\\d{10})",
+  "dateRegex": "(\\d{2}\\.\\d{2}\\.\\d{4})",
+  "dateInputFormat": "dd.MM.yyyy",
+  "deliveryDateRegex": "Date de livraison\\s*:\\s*(\\d{2}\\.\\d{2}\\.\\d{4})",
+  "deliveryPostCodeRegex": "(CH-\\d{4})\\s+",
+  "qtyBeforeCode": true
+}

@@ -332,7 +332,40 @@ function Get-PdfOrderData {
         $lines     = @()
         $seenItems = [System.Collections.Generic.HashSet[string]]::new()
 
-        if ($Template.PSObject.Properties['qtyUnit'] -and $Template.qtyUnit) {
+        if ($Template.PSObject.Properties['qtyBeforeCode'] -and $Template.qtyBeforeCode) {
+            # Qty-before-code mode (e.g. Aligro-Demaurex: "54x    2PI...ITEM_CODE 2 PI").
+            # The ordered quantity (54) precedes the item code in the row as {N}x.
+            #
+            # Pattern: \s\d{2,3}\d{6}\s*(\d{1,4})x
+            # Anchors on the full row structure: space + 2-3 digit Pos + 6-digit NoArt + qty.
+            # A naive \d{6}\s*(\d{1,4})x matches at offset inside "200443674100x", yielding
+            # qty=4100 instead of 100. Including the Pos prefix pins the match to row starts.
+            # Dimensions ("60x115cm") and pack labels ("7x") in descriptions are never
+            # preceded by a space+Pos+NoArt sequence — they are never matched.
+            #
+            # (?<![A-Z\-]) on codes prevents substring matches (SMA510-WT inside BL-SMA510-WT)
+            # while allowing codes that follow a digit in a description (e.g. "A4MC-BRA4-WR").
+            $qtyPositions = @([regex]::Matches($allText, '\s\d{2,3}\d{6}\s*(\d{1,4})x') | ForEach-Object {
+                [PSCustomObject]@{ Idx = $_.Index; Qty = [double]$_.Groups[1].Value }
+            })
+            $codeHits = @{}
+            foreach ($code in $itemLookup.Keys) {
+                $m = [regex]::Match($allText, '(?<![A-Z\-])' + [regex]::Escape($code))
+                if ($m.Success) {
+                    $preceding = @($qtyPositions | Where-Object { $_.Idx -lt $m.Index }) | Select-Object -Last 1
+                    if ($preceding) { $codeHits[$code] = @{ Idx = $m.Index; Qty = $preceding.Qty } }
+                }
+            }
+            foreach ($code in ($codeHits.Keys | Sort-Object { $codeHits[$_].Idx })) {
+                $mapped = $itemLookup[$code]
+                if ($seenItems.Add($mapped)) {
+                    $lines += [PSCustomObject]@{
+                        ItemNumber = $mapped
+                        Quantity   = $codeHits[$code].Qty
+                    }
+                }
+            }
+        } elseif ($Template.PSObject.Properties['qtyUnit'] -and $Template.qtyUnit) {
             # Integer+unit qty mode (e.g. GAFIC: 8PCE, 18PQT).
             # A general pattern would greedily absorb quantity digits into the code (ELE-BL-LA12PCE
             # becomes code=ELE-BL-LA1, qty=2). Per-code exact search avoids this entirely.
