@@ -503,7 +503,7 @@ function Get-PdfOrderData {
     foreach ($page in $pdf.GetPages()) {
         $pageNum++
         foreach ($word in $page.GetWords()) {
-            $b = [Math]::Round($word.BoundingBox.Bottom, 1)
+            $b = [Math]::Round($word.BoundingBox.Bottom, 0)
             $l = $word.BoundingBox.Left
 
             # Line item rows — key includes page number so identical Y coords on different pages don't collide
