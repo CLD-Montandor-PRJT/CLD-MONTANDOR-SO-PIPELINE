@@ -4,8 +4,8 @@
 .DESCRIPTION
     Scans each client Not_Processed folder, extracts order data from PDFs using
     per-client template.json (coordinate-based column extraction via PdfPig),
-    then POSTs to BC API v2.0 and OData-PATCHes Your_Reference, Requested_Delivery_Date,
-    and Ship_to_Code in a single call.
+    then POSTs to the Montandor pipeline API (salesOrderCreations) to create each order
+    atomically with yourReference and requestedDeliveryDate set in one call.
     Runs in dry-run mode by default. Pass -Execute to write to BC.
 .PARAMETER Execute
     Actually POST to BC and move PDFs. Without this flag, only prints what would happen.
@@ -620,62 +620,27 @@ function Submit-SalesOrder {
         [string]$PdfFileName = ''
     )
 
-    $env     = $Template.environment
-    $apiBase = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$env/api/v2.0/companies($companyId)"
-    $odataBase = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$env/ODataV4/Company('Montandor_Andorra')"
+    $env          = $Template.environment
+    $apiBase      = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$env/api/v2.0/companies($companyId)"
+    $pipelineBase = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$env/api/montandor/pipeline/v1.0/companies($companyId)"
 
-    # Step 1: POST sales order header
+    # Step 1: POST sales order — atomic: customerNumber + yourReference + requestedDeliveryDate in one call
+    $postBody = [ordered]@{ customerNumber = $Template.customerNumber; orderDate = $OrderData.OrderDate }
+    if ($OrderData.OrderRef)     { $postBody['yourReference']          = $OrderData.OrderRef }
+    if ($OrderData.DeliveryDate) { $postBody['requestedDeliveryDate']  = $OrderData.DeliveryDate }
+
     $order = $null
     try {
-        $order   = Invoke-RestMethod -Method Post -Uri "$apiBase/salesOrders" -Headers $jsonHeader `
-            -Body (@{ customerNumber = $Template.customerNumber; orderDate = $OrderData.OrderDate } | ConvertTo-Json)
-        Write-Host "    [OK] Order header created: $($order.number)" -ForegroundColor Green
+        $order = Invoke-RestMethod -Method Post -Uri "$pipelineBase/salesOrderCreations" -Headers $jsonHeader `
+            -Body ($postBody | ConvertTo-Json)
+        Write-Host "    [OK] Order created      : $($order.number)" -ForegroundColor Green
+        if ($OrderData.OrderRef)     { Write-Host "    [OK] Your Reference     : $($OrderData.OrderRef)" -ForegroundColor Green }
+        if ($OrderData.DeliveryDate) { Write-Host "    [OK] Requested Delivery : $($OrderData.DeliveryDate)" -ForegroundColor Green }
     } catch {
-        throw "POST sales order header failed: $(Get-ApiError $_)"
+        throw "POST sales order creation failed: $(Get-ApiError $_)"
     }
-    $orderId = $order.id
+    $orderId = $order.systemId
     $orderNo = $order.number
-
-    # Step 2: OData PATCH — Your_Reference + Requested_Delivery_Date
-    $odataPatch = @{}
-    if ($OrderData.OrderRef)     { $odataPatch['Your_Reference']          = $OrderData.OrderRef }
-    if ($OrderData.DeliveryDate) { $odataPatch['Requested_Delivery_Date'] = $OrderData.DeliveryDate }
-
-    if ($odataPatch.Count -gt 0) {
-        $patchAttempt = 0
-        $patchDone    = $false
-        while (-not $patchDone) {
-            $patchAttempt++
-            try {
-                $odata = Invoke-RestMethod -Method Get `
-                    -Uri "$odataBase/SalesOrder(Document_Type='Order',No='$orderNo')" -Headers $authHeader
-                Invoke-RestMethod -Method Patch `
-                    -Uri "$odataBase/SalesOrder(Document_Type='Order',No='$orderNo')" `
-                    -Headers ($authHeader + @{ 'Content-Type' = 'application/json'; 'If-Match' = $odata.'@odata.etag' }) `
-                    -Body ($odataPatch | ConvertTo-Json) | Out-Null
-                if ($OrderData.OrderRef)     { Write-Host "    [OK] Your Reference     : $($OrderData.OrderRef)" -ForegroundColor Green }
-                if ($OrderData.DeliveryDate) { Write-Host "    [OK] Requested Delivery : $($OrderData.DeliveryDate)" -ForegroundColor Green }
-                $patchDone = $true
-            } catch {
-                if ($patchAttempt -lt 3) {
-                    Write-Host "    [RETRY $patchAttempt/3] Your Reference PATCH failed — retrying in 5s: $(Get-ApiError $_)" -ForegroundColor Yellow
-                    Start-Sleep -Seconds 5
-                } else {
-                    $patchErr = Get-ApiError $_
-                    # All 3 attempts failed — roll back the order header so dedup works on the next watcher run.
-                    try {
-                        $reGet = Invoke-RestMethod -Uri "$apiBase/salesOrders($orderId)" -Headers $authHeader
-                        Invoke-RestMethod -Method Delete -Uri "$apiBase/salesOrders($orderId)" `
-                            -Headers ($authHeader + @{ 'If-Match' = $reGet.'@odata.etag' }) | Out-Null
-                        Write-Host "    [CLEANUP] Order $orderNo rolled back after 3 failed PATCH attempts." -ForegroundColor Yellow
-                    } catch {
-                        Write-Host "    [ERROR] Rollback DELETE of $orderNo also failed: $(Get-ApiError $_)" -ForegroundColor Red
-                    }
-                    throw "OData PATCH for Your_Reference/DeliveryDate failed after 3 attempts: $patchErr"
-                }
-            }
-        }
-    }
 
     # Step 3: ship-to — code (text-mode BC lookup) or custom address fields (words-mode coordinate extraction)
     if ($ShipToCode) {
@@ -732,7 +697,6 @@ function Submit-SalesOrder {
     # Step 5: POST order comment (if fixedComment is set in template)
     if ($Template.PSObject.Properties['fixedComment'] -and $Template.fixedComment) {
         try {
-            $pipelineBase = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$env/api/montandor/pipeline/v1.0/companies($companyId)"
             Invoke-RestMethod -Method Post -Uri "$pipelineBase/salesOrderComments" -Headers $jsonHeader `
                 -Body (@{ documentNo = $orderNo; comment = $Template.fixedComment } | ConvertTo-Json) | Out-Null
             Write-Host "    [OK] Comment            : $($Template.fixedComment)" -ForegroundColor Green
