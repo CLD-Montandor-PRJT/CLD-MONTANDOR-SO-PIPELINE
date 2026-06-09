@@ -1,0 +1,14 @@
+{
+  "clientName": "Ouestotel",
+  "customerNumber": "C0000224",
+  "environment": "Production",
+  "orderNumberRegex": "N°\\s*(\\d{5,6})",
+  "dateRegex": "(\\d{2}/\\d{2}/\\d{4})",
+  "dateInputFormat": "dd/MM/yyyy",
+  "yourRefColumnXRange": [20, 95],
+  "qtyColumnXRange": [340, 375],
+  "itemCodePattern": "^[A-Z][A-Z0-9\\-]{2,}$",
+  "qtyPattern": "^\\d+$",
+  "itemRowYMax": 615,
+  "itemRowYMin": 55
+}
