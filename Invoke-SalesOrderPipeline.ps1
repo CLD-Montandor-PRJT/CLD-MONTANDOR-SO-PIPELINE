@@ -399,9 +399,15 @@ function Get-PdfOrderData {
                     }
                 }
             }
-            # Detect codes in VERMES# references not matched to BC — unit suffix forces correct backtracking
+            # Detect codes in VERMES# references not matched to BC — unit suffix forces correct backtracking.
+            # Position-based dedup: if a known code was already matched at the same text position, skip —
+            # the greedy regex may extract a slightly different string (e.g. ELE-M-SM1 vs ELE-M-SM) but
+            # the position overlap proves the item was already handled by the per-code exact search above.
+            $knownPositions = [System.Collections.Generic.HashSet[int]]::new()
+            foreach ($v in $codeHits.Values) { [void]$knownPositions.Add($v.Idx) }
             $seenUnknown = [System.Collections.Generic.HashSet[string]]::new()
             foreach ($m in [regex]::Matches($allText, '#([A-Z][A-Z0-9\-]+)(\d+)(?:' + $unitPat + ')')) {
+                if ($knownPositions.Contains($m.Index + 1)) { continue }
                 $code = $m.Groups[1].Value
                 if (-not $codeHits.ContainsKey($code) -and $seenUnknown.Add($code)) {
                     $unknownCodes += $code
