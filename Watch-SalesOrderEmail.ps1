@@ -218,15 +218,20 @@ function Build-ModifiedOrderHtml {
 # ---------------------------------------------------------------------------
 if ($FunctionsOnly) { return }   # dot-source mode — load functions only, skip main block
 
-$today = (Get-Date -Hour 0 -Minute 0 -Second 0).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-Write-Host "`n[WATCH] Scanning $supcom — all emails with attachments since $today" -ForegroundColor Cyan
+# Rolling lookback window. Re-scan the last N days of emails so an order that arrives after
+# the final daily run — or while this PC is off (evenings, weekends, holidays) — is still
+# picked up on the next run, instead of being stranded by a "since midnight today" cutoff.
+# Safe because the Your_Reference deduplication below skips any order already posted to BC.
+$lookbackDays = 4   # covers after-hours, overnight, and standard weekends; widen if longer gaps expected
+$since = (Get-Date).Date.AddDays(-$lookbackDays).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+Write-Host "`n[WATCH] Scanning $supcom — all emails with attachments since $since (UTC, ${lookbackDays}-day lookback)" -ForegroundColor Cyan
 
 # No isRead filter — a colleague reading an email before the script runs should not prevent
 # the order from being created. Deduplication (Your_Reference check) prevents double-posting.
-$filter = "hasAttachments eq true and receivedDateTime ge $today"
+$filter = "hasAttachments eq true and receivedDateTime ge $since"
 try {
     $msgs = Invoke-RestMethod `
-        -Uri "$graphBase/mailFolders/inbox/messages?`$filter=$filter&`$select=id,subject,from,receivedDateTime,body&`$top=100" `
+        -Uri "$graphBase/mailFolders/inbox/messages?`$filter=$filter&`$select=id,subject,from,receivedDateTime,body&`$top=250" `
         -Headers $graphHeader
 } catch {
     $errMsg   = $_.Exception.Message
@@ -243,8 +248,8 @@ try {
 }
 
 Write-Host "Found $($msgs.value.Count) candidate email(s)." -ForegroundColor Cyan
-if ($msgs.value.Count -eq 100) {
-    Write-Host "[WARN] Inbox fetch hit the 100-email limit — some emails may have been missed. Review inbox manually." -ForegroundColor Yellow
+if ($msgs.value.Count -eq 250) {
+    Write-Host "[WARN] Inbox fetch hit the 250-email limit — some emails may have been missed. Review inbox manually." -ForegroundColor Yellow
 }
 
 $ordersPosted = 0
@@ -384,23 +389,43 @@ foreach ($msg in $msgs.value) {
                     Write-Host "    [SKIP] Order ref $($data.OrderRef) already in BC, lines and address unchanged." -ForegroundColor Yellow
                 }
             } elseif (-not $skipOrder) {
+                # Text-mode unrecognised Ref Fournisseur codes (detected at extraction, never attempted as lines).
                 $unknownItems = @(if ($data.PSObject.Properties['UnknownCodes']) { $data.UnknownCodes })
-                if ($unknownItems.Count -gt 0) {
-                    $codeList = $unknownItems -join ', '
-                    Write-Host "    [STOP] $($unknownItems.Count) item(s) not in BC — order not posted: $codeList" -ForegroundColor Red
+
+                if ($data.Lines.Count -eq 0) {
+                    # Nothing recognisable to post — do NOT create an empty order. Treat as retryable so
+                    # the next run picks it up (e.g. once the missing items are created in BC).
+                    $codeList = if ($unknownItems.Count -gt 0) { $unknownItems -join ', ' } else { '(no item lines could be extracted from the PDF)' }
+                    Write-Host "    [STOP] No postable lines — order not posted, will retry: $codeList" -ForegroundColor Red
                     $emailOk = $false
                     $body = (Build-InfoBox ([ordered]@{ 'Client' = $tpl.clientName; 'Order ref' = $data.OrderRef; 'From' = $senderEmail; 'Email' = $msg.subject })) +
-                            (Build-AlertBox -Message "The following item code(s) were found in the PDF but are <strong>not set up in BC</strong>:<br><br><strong>$([System.Net.WebUtility]::HtmlEncode($codeList))</strong><br><br>Please create these items in BC. The order will be posted automatically on the next watcher run once all items are available." -Bg '#f8d7da' -Fg '#721c24' -Border '#f5c6cb')
+                            (Build-AlertBox -Message "No items on this order could be matched to BC, so <strong>nothing was posted</strong>.<br><br>Unrecognised reference(s):<br><strong>$([System.Net.WebUtility]::HtmlEncode($codeList))</strong><br><br>Create the item(s) in BC — the order will be posted automatically on the next watcher run." -Bg '#f8d7da' -Fg '#721c24' -Border '#f5c6cb')
                     Send-NotificationEmail `
-                        -Subject     "[Sales Order] Unrecognised items — $($tpl.clientName) ref $($data.OrderRef)" `
+                        -Subject     "[Sales Order] Order not posted — $($tpl.clientName) ref $($data.OrderRef)" `
                         -AlsoNotify  @('x.planchette@montandor.com') `
-                        -Body        (Build-HtmlShell -Title 'Unrecognised Items — Order Not Posted' -Subtitle 'The order has not been posted to BC.' -Body $body) `
+                        -Body        (Build-HtmlShell -Title 'Order Not Posted — No Recognised Items' -Subtitle 'The order has not been posted to BC and will retry on the next run.' -Body $body) `
                         -ContentType 'HTML'
                 } else {
-                    $bcNo = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode -PdfBytes $pdfBytes -PdfFileName $att.name
+                    $result = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode -PdfBytes $pdfBytes -PdfFileName $att.name
+                    $bcNo   = $result.OrderNo
                     $seenRefs.Add($refKey) | Out-Null
                     Write-Host "    -> BC $bcNo posted to $($tpl.environment)" -ForegroundColor Green
                     $ordersPosted++
+
+                    # Skipped lines = text-mode unrecognised codes (never attempted) + any line BC rejected
+                    # at POST. The order IS posted; this is an informational amber alert. Not retried.
+                    $skippedAll = @($unknownItems) + @($result.SkippedLines)
+                    if ($skippedAll.Count -gt 0) {
+                        $skipList = ($skippedAll | ForEach-Object { [System.Net.WebUtility]::HtmlEncode($_) }) -join '<br>'
+                        Write-Host "    [NOTIFY] $($skippedAll.Count) line(s) skipped — order posted as $bcNo." -ForegroundColor Yellow
+                        $sbody = (Build-InfoBox ([ordered]@{ 'Client' = $tpl.clientName; 'Order ref' = $data.OrderRef; 'BC order' = "<strong>$bcNo</strong>"; 'From' = $senderEmail; 'Email' = $msg.subject })) +
+                                 (Build-AlertBox -Message "Order <strong>$bcNo</strong> was posted, but the following reference(s) could <strong>not</strong> be matched to a BC item and were <strong>skipped</strong>:<br><br><strong>$skipList</strong><br><br>If these belong on the order, add them manually in BC &mdash; they will <strong>not</strong> be added automatically.")
+                        Send-NotificationEmail `
+                            -Subject     "[Sales Order] Lines skipped — $($tpl.clientName) order $bcNo" `
+                            -AlsoNotify  @('x.planchette@montandor.com') `
+                            -Body        (Build-HtmlShell -Title 'Lines Skipped — Order Posted' -Subtitle "Order $bcNo posted to BC with one or more lines skipped." -Body $sbody) `
+                            -ContentType 'HTML'
+                    }
                 }
             }
         } catch {

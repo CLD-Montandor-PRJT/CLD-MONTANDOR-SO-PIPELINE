@@ -6,5 +6,6 @@
   "orderNumberRegex": "(PO\\d{4}-\\d{6})",
   "dateRegex": "(\\d{2}/\\d{2}/\\d{4})",
   "dateInputFormat": "dd/MM/yyyy",
-  "qtyUnit": "PCE|PQT"
+  "qtyUnit": "PCE|PQT",
+  "recoverFromDesignation": true
 }

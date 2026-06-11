@@ -385,20 +385,23 @@ function Get-PdfOrderData {
             # A general pattern would greedily absorb quantity digits into the code (ELE-BL-LA12PCE
             # becomes code=ELE-BL-LA1, qty=2). Per-code exact search avoids this entirely.
             $unitPat  = $Template.qtyUnit
+            $recover  = $Template.PSObject.Properties['recoverFromDesignation'] -and $Template.recoverFromDesignation
             $codeHits = @{}
             foreach ($code in $itemLookup.Keys) {
                 $m = [regex]::Match($allText, [regex]::Escape($code) + "(\d+)(?:$unitPat)")
                 if ($m.Success) { $codeHits[$code] = @{ Idx = $m.Index; Qty = $m.Groups[1].Value } }
             }
-            foreach ($code in ($codeHits.Keys | Sort-Object { $codeHits[$_].Idx })) {
+
+            # Collect line records carrying text position, so any line recovered from the Désignation
+            # (below) sorts back into document order alongside the per-code matches.
+            $lineRecs = @()
+            foreach ($code in $codeHits.Keys) {
                 $mapped = $itemLookup[$code]
                 if ($seenItems.Add($mapped)) {
-                    $lines += [PSCustomObject]@{
-                        ItemNumber = $mapped
-                        Quantity   = [double]$codeHits[$code].Qty
-                    }
+                    $lineRecs += [PSCustomObject]@{ Idx = $codeHits[$code].Idx; ItemNumber = $mapped; Quantity = [double]$codeHits[$code].Qty }
                 }
             }
+
             # Detect codes in VERMES# references not matched to BC — unit suffix forces correct backtracking.
             # Position-based dedup: if a known code was already matched at the same text position, skip —
             # the greedy regex may extract a slightly different string (e.g. ELE-M-SM1 vs ELE-M-SM) but
@@ -406,12 +409,44 @@ function Get-PdfOrderData {
             $knownPositions = [System.Collections.Generic.HashSet[int]]::new()
             foreach ($v in $codeHits.Values) { [void]$knownPositions.Add($v.Idx) }
             $seenUnknown = [System.Collections.Generic.HashSet[string]]::new()
+            $prevIdx     = 0
             foreach ($m in [regex]::Matches($allText, '#([A-Z][A-Z0-9\-]+)(\d+)(?:' + $unitPat + ')')) {
-                if ($knownPositions.Contains($m.Index + 1)) { continue }
+                $curIdx = $m.Index
+                if ($knownPositions.Contains($curIdx + 1)) { $prevIdx = $curIdx; continue }
                 $code = $m.Groups[1].Value
-                if (-not $codeHits.ContainsKey($code) -and $seenUnknown.Add($code)) {
+                $qty  = $m.Groups[2].Value
+                if ($codeHits.ContainsKey($code) -or -not $seenUnknown.Add($code)) { $prevIdx = $curIdx; continue }
+
+                # Désignation recovery (GAFIC, gated by recoverFromDesignation): the Ref Fournisseur is
+                # sometimes truncated in its own column (e.g. BL-SMA100-V7) while the full BC item code
+                # appears inside the row's Désignation text (e.g. "...COLORE X7 BL-SMA100-V7-AS [14477]").
+                # Search this row's window (bounded by the previous and current VERMES# anchors) for the
+                # truncated code extended to the next space/bracket; if that fuller string is a BC item
+                # (or mapping alternative) use it. Qty comes from the VERMES# anchor. The leading Ref is
+                # glued to the description (BL-SMA100-V7FEUTRE...) so it self-rejects — only the real code matches.
+                $rec = $null
+                if ($recover) {
+                    $winStart = [Math]::Max(0, $prevIdx)
+                    $window   = $allText.Substring($winStart, $curIdx - $winStart)
+                    foreach ($mm in [regex]::Matches($window, [regex]::Escape($code) + '[^\s\[\]]*')) {
+                        $cand = $mm.Value
+                        if ($cand -eq $code) { continue }   # bare truncated ref — already known not in BC
+                        if ($itemLookup.ContainsKey($cand)) { $rec = $itemLookup[$cand]; break }
+                    }
+                }
+                if ($rec) {
+                    if ($seenItems.Add($rec)) {
+                        $lineRecs += [PSCustomObject]@{ Idx = $curIdx; ItemNumber = $rec; Quantity = [double]$qty }
+                        Write-Host "    [RECOVERED] $code -> $rec (qty $qty) from Désignation" -ForegroundColor Green
+                    }
+                } else {
                     $unknownCodes += $code
                 }
+                $prevIdx = $curIdx
+            }
+
+            foreach ($r in ($lineRecs | Sort-Object Idx)) {
+                $lines += [PSCustomObject]@{ ItemNumber = $r.ItemNumber; Quantity = $r.Quantity }
             }
         } else {
             # Comma-decimal qty mode (e.g. CR Distribution: 5,20) — single pass over text.
@@ -679,8 +714,9 @@ function Submit-SalesOrder {
         }
     }
 
-    # Step 4: POST sales order lines
-    $lineErrors  = 0
+    # Step 4: POST sales order lines. Individual line failures are tolerated — a bad line is
+    # skipped, not fatal. The caller is told which lines were skipped so it can notify (amber).
+    $lineOk      = 0
     $failedLines = [System.Collections.Generic.List[string]]::new()
     foreach ($line in $OrderData.Lines) {
         try {
@@ -688,16 +724,26 @@ function Submit-SalesOrder {
                 -Uri "$apiBase/salesOrders($orderId)/salesOrderLines" -Headers $jsonHeader `
                 -Body (@{ lineType = 'Item'; lineObjectNumber = $line.ItemNumber; quantity = $line.Quantity } | ConvertTo-Json)
             Write-Host ("    [OK] {0,-22} qty {1,6}  -> EUR {2}" -f $line.ItemNumber, $line.Quantity, $result.unitPrice) -ForegroundColor Green
+            $lineOk++
         } catch {
             $lineErr = Get-ApiError $_
             Write-Host ("    [ERROR] Line {0} qty {1}: {2}" -f $line.ItemNumber, $line.Quantity, $lineErr) -ForegroundColor Red
             $failedLines.Add("$($line.ItemNumber)  qty $($line.Quantity)  —  $lineErr")
-            $lineErrors++
         }
     }
 
-    if ($lineErrors -gt 0) {
-        throw "PARTIAL:Order $orderNo posted to BC but $lineErrors line(s) failed to add. Add the missing lines manually in BC:`n$($failedLines -join "`n")"
+    # No line made it onto the order — roll back the empty header so the order is NOT left in BC,
+    # and the next watcher run retries the PDF (e.g. once the missing items are created in BC).
+    if ($lineOk -eq 0) {
+        try {
+            $reGet = Invoke-RestMethod -Uri "$apiBase/salesOrders($orderId)" -Headers $authHeader
+            Invoke-RestMethod -Method Delete -Uri "$apiBase/salesOrders($orderId)" `
+                -Headers ($authHeader + @{ 'If-Match' = $reGet.'@odata.etag' }) | Out-Null
+            Write-Host "    [ROLLBACK] No lines added — empty order $orderNo deleted." -ForegroundColor Yellow
+        } catch {
+            Write-Host "    [WARN] Rollback delete failed: $(Get-ApiError $_)" -ForegroundColor Yellow
+        }
+        throw "No lines could be added to order $orderNo — order not posted. The PDF will be retried on the next run."
     }
 
     # Step 5: POST order comment (if fixedComment is set in template)
@@ -746,7 +792,7 @@ function Submit-SalesOrder {
         }
     }
 
-    return $orderNo
+    return [PSCustomObject]@{ OrderNo = $orderNo; SkippedLines = $failedLines }
 }
 
 # ---------------------------------------------------------------------------
@@ -828,9 +874,13 @@ foreach ($dir in $clientDirs) {
                     Write-Host "    [SKIP] Order not posted — register ship-to postcode $($data.ShipToPostCode) in BC and resubmit." -ForegroundColor Yellow
                 } else {
                     $pdfFileBytes = [System.IO.File]::ReadAllBytes($pdf.FullName)
-                    $bcNo = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode -PdfBytes $pdfFileBytes -PdfFileName $pdf.Name
+                    $result = Submit-SalesOrder -OrderData $data -Template $tpl -ShipToCode $shipToCode -PdfBytes $pdfFileBytes -PdfFileName $pdf.Name
+                    $bcNo   = $result.OrderNo
                     Move-Item -Path $pdf.FullName -Destination (Join-Path $procDir $pdf.Name) -Force
                     Write-Host "    -> BC $bcNo | moved to Processed" -ForegroundColor Green
+                    if (@($result.SkippedLines).Count -gt 0) {
+                        Write-Host ("    [NOTIFY] {0} line(s) skipped: {1}" -f @($result.SkippedLines).Count, (@($result.SkippedLines) -join '; ')) -ForegroundColor Yellow
+                    }
                     $processed++
                 }
             }
