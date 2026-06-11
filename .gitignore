@@ -19,3 +19,7 @@ docs/superpowers/
 # PDF files anywhere in the tree
 *.pdf
 *.PDF
+
+# Local scratch / one-off ops scripts — not part of the pipeline
+_*.ps1
+Delete-BugOrders.ps1
