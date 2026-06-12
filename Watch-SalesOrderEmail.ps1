@@ -218,6 +218,24 @@ function Build-ModifiedOrderHtml {
 # ---------------------------------------------------------------------------
 if ($FunctionsOnly) { return }   # dot-source mode — load functions only, skip main block
 
+# ---------------------------------------------------------------------------
+# Single-instance lock — prevent concurrent watcher runs (e.g. a manual run overlapping a
+# scheduled one). Two simultaneous runs can each pass the Your_Reference dedup check before
+# either commits (read-before-write race, worsened by BC's multi-second OData propagation lag),
+# producing duplicate BC orders — this is what created orders 260600349/350 on 2026-06-11.
+# The task runs in Xavier's interactive session, so a session-local named mutex is shared by
+# both the scheduled task and any manual run. The OS releases it automatically if the process
+# dies, so a crash cannot wedge the lock.
+# ---------------------------------------------------------------------------
+$watcherMutex = [System.Threading.Mutex]::new($false, 'Montandor-SalesOrderWatcher')
+$haveLock     = $false
+try   { $haveLock = $watcherMutex.WaitOne(0) }
+catch [System.Threading.AbandonedMutexException] { $haveLock = $true }   # prior run died holding it — we own it now
+if (-not $haveLock) {
+    Write-Host '[LOCK] Another Sales Order watcher instance is already running — exiting to avoid duplicate orders.' -ForegroundColor Yellow
+    return
+}
+
 # Rolling lookback window. Re-scan the last N days of emails so an order that arrives after
 # the final daily run — or while this PC is off (evenings, weekends, holidays) — is still
 # picked up on the next run, instead of being stranded by a "since midnight today" cutoff.
@@ -460,5 +478,9 @@ foreach ($msg in $msgs.value) {
 
 # Wipe credentials from memory
 $clientSecret = $null; $token = $null; $graphToken = $null
+
+# Release the single-instance lock (the OS also releases it on process exit as a backstop)
+if ($haveLock) { $watcherMutex.ReleaseMutex() }
+$watcherMutex.Dispose()
 
 Write-Host ("`n[WATCH] Complete. Orders posted: {0} | Emails skipped: {1}`n" -f $ordersPosted, $skipped) -ForegroundColor Cyan
