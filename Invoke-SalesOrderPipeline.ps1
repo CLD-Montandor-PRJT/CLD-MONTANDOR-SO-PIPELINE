@@ -256,6 +256,75 @@ function Get-BcItemNumbers {
 }
 
 # ---------------------------------------------------------------------------
+# Hyphen/punctuation-insensitive BC item index. Returns @{ normalizedKey -> BC number }
+# but ONLY for keys that map to a single BC item; ambiguous stripped forms are omitted
+# so they fall through to the unknown-code path rather than guess.
+# ---------------------------------------------------------------------------
+function Build-NormalizedItemIndex {
+    param([string[]]$BcItemNumbers)
+    $groups = @{}
+    foreach ($n in $BcItemNumbers) {
+        if (-not $n) { continue }
+        $k = ($n -replace '[^A-Za-z0-9]', '').ToUpperInvariant()
+        if (-not $groups.ContainsKey($k)) { $groups[$k] = [System.Collections.Generic.List[string]]::new() }
+        $groups[$k].Add($n)
+    }
+    $index = @{}
+    foreach ($kv in $groups.GetEnumerator()) {
+        if ($kv.Value.Count -eq 1) { $index[$kv.Key] = $kv.Value[0] }
+    }
+    return $index
+}
+
+# Resolve a raw PDF code to a BC item number.
+# Order: explicit mapping.json override -> exact BC match -> unique hyphen-insensitive match.
+# Returns $null if unresolved (caller treats it as an unknown code).
+function Resolve-ItemCode {
+    param([string]$Code, [hashtable]$ExactSet, [hashtable]$NormalizedIndex, $Mapping)
+    if (-not $Code) { return $null }
+    if ($Mapping -and $Mapping.PSObject.Properties[$Code]) { return $Mapping.PSObject.Properties[$Code].Value }
+    if ($ExactSet.ContainsKey($Code)) { return $ExactSet[$Code] }
+    $nk = ($Code -replace '[^A-Za-z0-9]', '').ToUpperInvariant()
+    if ($NormalizedIndex.ContainsKey($nk)) { return $NormalizedIndex[$nk] }
+    return $null
+}
+
+# ---------------------------------------------------------------------------
+# Suggest likely BC item(s) for an UNRECOGNISED code — used ONLY as a "did you mean"
+# hint in alert emails, NEVER to auto-post a line. A truncation drops characters off the
+# end, so the real BC code (hyphen-stripped) starts with the unknown code (hyphen-stripped).
+# ---------------------------------------------------------------------------
+function Get-ItemSuggestion {
+    param([string]$Code, [string[]]$BcItemNumbers, [int]$Max = 4)
+    if (-not $Code) { return @() }
+    $nc = ($Code -replace '[^A-Za-z0-9]', '').ToUpperInvariant()
+    if ($nc.Length -lt 4) { return @() }
+    $pairs = foreach ($n in $BcItemNumbers) {
+        if ($n) { [PSCustomObject]@{ Number = $n; Norm = ($n -replace '[^A-Za-z0-9]', '').ToUpperInvariant() } }
+    }
+    # 1) BC codes the unknown code is a prefix of (classic end-truncation)
+    $hits = @($pairs | Where-Object { $_.Norm -ne $nc -and $_.Norm.StartsWith($nc) } | Select-Object -ExpandProperty Number)
+    # 2) fallback: share the first 6 chars (truncation plus a near-end typo)
+    if ($hits.Count -eq 0 -and $nc.Length -ge 6) {
+        $stem = $nc.Substring(0, 6)
+        $hits = @($pairs | Where-Object { $_.Norm.StartsWith($stem) } | Select-Object -ExpandProperty Number)
+    }
+    return @($hits | Select-Object -Unique -First $Max)
+}
+
+# Format one unrecognised code as an HTML-encoded list entry, with a "did you mean" hint if available.
+function Format-UnknownCodeHtml {
+    param([string]$Code, [string[]]$BcItemNumbers)
+    $enc = [System.Net.WebUtility]::HtmlEncode($Code)
+    $sug = @(Get-ItemSuggestion -Code $Code -BcItemNumbers $BcItemNumbers)
+    if ($sug.Count -gt 0) {
+        $sugEnc = ($sug | ForEach-Object { [System.Net.WebUtility]::HtmlEncode($_) }) -join ', '
+        return "$enc &nbsp;&rarr;&nbsp; did you mean: <em>$sugEnc</em>?"
+    }
+    return $enc
+}
+
+# ---------------------------------------------------------------------------
 # PDF extraction (coordinate-based)
 # ---------------------------------------------------------------------------
 function Get-PdfOrderData {
@@ -537,7 +606,11 @@ function Get-PdfOrderData {
     $yDMin = if ($hasDelivDateCfg) { $Template.deliveryDateYRange[0] } else { 0 }
     $yDMax = if ($hasDelivDateCfg) { $Template.deliveryDateYRange[1] } else { 0 }
 
-    $rowData  = @{}
+    # Collect code words and qty words separately. Codes keep one row per (page, rounded Bottom);
+    # qty words are paired to the nearest code-row within a small baseline tolerance below, so a
+    # qty nudged 1px off its code by a wrapped description is no longer dropped.
+    $refRows  = @{}   # "P{page}_{bottom}" -> [PSCustomObject]@{ Ref; Page; Bottom }
+    $qtyList  = [System.Collections.Generic.List[object]]::new()
     $addrRows = @{}  # delivery address words grouped by Bottom row
     $pageNum  = 0
 
@@ -547,17 +620,16 @@ function Get-PdfOrderData {
             $b = [Math]::Round($word.BoundingBox.Bottom, 0)
             $l = $word.BoundingBox.Left
 
-            # Line item rows — key includes page number so identical Y coords on different pages don't collide
+            # Line item rows
             if ($b -ge $yMin -and $b -le $yMax) {
-                $key = "P${pageNum}_${b}"
-                if (-not $rowData.ContainsKey($key)) { $rowData[$key] = @{ ref = ''; qty = '' } }
-                if ($l -ge $xRef[0] -and $l -le $xRef[1] -and
-                    -not $rowData[$key].ref -and $word.Text -match $codePat) {
-                    $rowData[$key].ref = $word.Text
+                if ($l -ge $xRef[0] -and $l -le $xRef[1] -and $word.Text -match $codePat) {
+                    $key = "P${pageNum}_${b}"
+                    if (-not $refRows.ContainsKey($key)) {
+                        $refRows[$key] = [PSCustomObject]@{ Ref = $word.Text; Page = $pageNum; Bottom = $b }
+                    }
                 }
-                if ($l -ge $xQty[0] -and $l -le $xQty[1] -and
-                    -not $rowData[$key].qty -and $word.Text -match $qtyPat) {
-                    $rowData[$key].qty = $word.Text
+                if ($l -ge $xQty[0] -and $l -le $xQty[1] -and $word.Text -match $qtyPat) {
+                    $qtyList.Add([PSCustomObject]@{ Page = $pageNum; Bottom = $b; Text = $word.Text })
                 }
             }
 
@@ -620,22 +692,37 @@ function Get-PdfOrderData {
         }
     }
 
-    # Apply item mapping if mapping.json exists
+    # Pair each qty word to the nearest code-row on the same page within tolerance.
+    $rowTol = 3
+    foreach ($q in $qtyList) {
+        $cand = $refRows.Values |
+            Where-Object { $_.Page -eq $q.Page -and [Math]::Abs($_.Bottom - $q.Bottom) -le $rowTol } |
+            Sort-Object { [Math]::Abs($_.Bottom - $q.Bottom) } |
+            Select-Object -First 1
+        if ($cand -and -not $cand.PSObject.Properties['Qty']) {
+            $cand | Add-Member -NotePropertyName Qty -NotePropertyValue $q.Text
+        }
+    }
+
+    # Resolve codes: mapping.json override -> exact BC match -> unique hyphen-insensitive match.
+    # Unresolved codes are collected so the caller diverts them to the amber 'unrecognised items'
+    # alert instead of creating an order whose line POSTs all fail.
     $mapping = $null
     if (Test-Path $mapPath) { $mapping = Get-Content $mapPath | ConvertFrom-Json }
+    $exactSet = @{}
+    foreach ($n in $BcItemNumbers) { if ($n) { $exactSet[$n] = $n } }
+    $normIndex = Build-NormalizedItemIndex -BcItemNumbers $BcItemNumbers
 
-    $lines = @()
-    foreach ($key in ($rowData.Keys | Sort-Object { [double]($_ -replace '^P\d+_', '') } -Descending)) {
-        $row = $rowData[$key]
-        if ($row.ref -and $row.qty) {
-            $item = $row.ref
-            if ($mapping -and $mapping.PSObject.Properties[$item]) {
-                $item = $mapping.PSObject.Properties[$item].Value
-            }
-            $lines += [PSCustomObject]@{
-                ItemNumber = $item
-                Quantity   = [double]($row.qty -replace ',', '.')
-            }
+    $lines        = @()
+    $unknownCodes = @()
+    $seenUnknown  = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($r in ($refRows.Values | Sort-Object Page, @{ Expression = 'Bottom'; Descending = $true })) {
+        if (-not $r.PSObject.Properties['Qty']) { continue }
+        $resolved = Resolve-ItemCode -Code $r.Ref -ExactSet $exactSet -NormalizedIndex $normIndex -Mapping $mapping
+        if ($resolved) {
+            $lines += [PSCustomObject]@{ ItemNumber = $resolved; Quantity = [double]($r.Qty -replace ',', '.') }
+        } elseif ($seenUnknown.Add($r.Ref)) {
+            $unknownCodes += $r.Ref
         }
     }
 
@@ -646,6 +733,7 @@ function Get-PdfOrderData {
         ShipTo         = $shipTo
         ShipToPostCode = ''
         Lines          = $lines
+        UnknownCodes   = $unknownCodes
     }
 }
 
