@@ -1,0 +1,11 @@
+{
+  "mailbox": "administration@montandor.com",
+  "folderHint": "Invoices",
+  "sender": "finance.dept@vermes.nl",
+  "environment": "Production",
+  "vendorNumber": "400.041",
+  "yourRefRegex": "Your\\s*Ref\\.?\\s*:?\\s*([A-Za-z0-9][A-Za-z0-9\\-/]*)",
+  "lookbackDays": 7,
+  "alertAfterDays": 6,
+  "alertRecipients": ["administration@montandor.com", "x.planchette@montandor.com"]
+}

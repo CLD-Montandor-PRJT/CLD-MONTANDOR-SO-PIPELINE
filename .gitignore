@@ -23,3 +23,6 @@ docs/superpowers/
 # Local scratch / one-off ops scripts — not part of the pipeline
 _*.ps1
 Delete-BugOrders.ps1
+
+# Vermes invoice filing runtime state
+vermes-alerted.json
