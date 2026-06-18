@@ -10,6 +10,8 @@
   "dateInputFormat": "dd.MM.yyyy",
   "yourRefColumnXRange": [460, 560],
   "qtyColumnXRange": [115, 155],
+  "articleCodeXRange": [10, 60],
+  "articleCodePattern": "^\\d{4,6}$",
   "itemCodePattern": "^[A-Z][A-Z0-9\\-]{2,}$",
   "qtyPattern": "^\\d+$",
   "itemRowYMax": 650,

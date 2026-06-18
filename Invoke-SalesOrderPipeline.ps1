@@ -98,7 +98,8 @@ $authHeader  = @{ Authorization = "Bearer $($token.access_token)" }
 $jsonHeader  = $authHeader + @{ 'Content-Type' = 'application/json' }
 $graphHeader = @{ Authorization = "Bearer $($graphToken.access_token)" }
 $companyId   = '4e422ae7-867a-ef11-a671-000d3a45ce6c'
-$bcItemCache = @{}
+$bcItemCache  = @{}
+$custRefCache = @{}
 Write-Host "  BC token acquired. Expires in $($token.expires_in)s." -ForegroundColor Green
 Write-Host "  Graph token acquired. Expires in $($graphToken.expires_in)s." -ForegroundColor Green
 
@@ -253,6 +254,53 @@ function Get-BcItemNumbers {
     $bcItemCache[$Environment] = @($resp.value | ForEach-Object { $_.number })
     Write-Host "    $($bcItemCache[$Environment].Count) items loaded." -ForegroundColor Green
     return $bcItemCache[$Environment]
+}
+
+# Normalise a customer reference / Code Article for matching: strip whitespace and leading zeros
+# so the PDF's zero-padded code (e.g. "012702") matches BC's stored value (e.g. "12702").
+function Normalize-RefNo {
+    param([string]$Value)
+    if ($null -eq $Value) { return '' }
+    $t = ($Value -replace '\s', '').TrimStart('0')
+    if ($t -eq '') { return '0' }
+    return $t
+}
+
+# ---------------------------------------------------------------------------
+# Customer item references (cached per environment+customer). Maps the customer's own
+# article number (the PDF "Code Article" column) to our BC item number, read from BC's
+# Item Reference table via the auto-published Item_References_Excel OData page. This is the
+# authoritative, business-maintained cross-reference — used to resolve codes that the
+# supplier-reference column truncates or renders ambiguous (e.g. In Situ "012702" ->
+# "RS-RT-RVS-GY-SET", where the supplier ref is cut to the ambiguous prefix "RS-RT-RVS-GY-").
+# Returns @{ normalisedRefNo -> BC item number }. On any failure returns an empty map so the
+# caller falls back to the existing supplier-reference resolution (no behaviour change).
+# ---------------------------------------------------------------------------
+function Get-CustomerItemReferences {
+    param([string]$CustomerNumber, [string]$Environment)
+    $cacheKey = "$Environment|$CustomerNumber"
+    if ($custRefCache.ContainsKey($cacheKey)) { return $custRefCache[$cacheKey] }
+    Write-Host "  [REFS] Loading customer item references ($CustomerNumber, $Environment)..." -ForegroundColor Cyan
+    $odata = "https://api.businesscentral.dynamics.com/v2.0/$tenantId/$Environment/ODataV4/Company('Montandor_Andorra')"
+    $safe  = $CustomerNumber -replace "'", "''"
+    $flt   = "Reference_Type eq 'Customer' and Reference_Type_No eq '$safe'"
+    $map   = @{}
+    try {
+        $url = "$odata/Item_References_Excel?`$filter=$([uri]::EscapeDataString($flt))&`$top=1000"
+        do {
+            $r = Invoke-RestMethod -Uri $url -Headers $authHeader
+            foreach ($ref in $r.value) {
+                $k = Normalize-RefNo $ref.Reference_No
+                if ($k -and -not $map.ContainsKey($k)) { $map[$k] = $ref.Item_No }
+            }
+            $url = if ($r.PSObject.Properties['@odata.nextLink']) { $r.'@odata.nextLink' } else { $null }
+        } while ($url)
+        Write-Host "    $($map.Count) references loaded." -ForegroundColor Green
+    } catch {
+        Write-Host "    [WARN] Item reference load failed ($($_.Exception.Message)); falling back to supplier-ref resolution." -ForegroundColor Yellow
+    }
+    $custRefCache[$cacheKey] = $map
+    return $map
 }
 
 # ---------------------------------------------------------------------------
@@ -597,6 +645,12 @@ function Get-PdfOrderData {
     $codePat = $Template.itemCodePattern
     $qtyPat  = if ($Template.PSObject.Properties['qtyPattern']) { $Template.qtyPattern } else { '^\d+,\d{2}$' }
 
+    # Optional "Code Article" column (customer's own article number). When present, each row's
+    # Code Article is resolved via BC customer item references first (authoritative), with the
+    # supplier-reference column as fallback. Opt-in per client via articleCodeXRange.
+    $xArt   = if ($Template.PSObject.Properties['articleCodeXRange'])  { $Template.articleCodeXRange } else { $null }
+    $artPat = if ($Template.PSObject.Properties['articleCodePattern']) { $Template.articleCodePattern } else { '^\d{4,6}$' }
+
     $hasDeliveryAddrCfg = $Template.PSObject.Properties['deliveryAddressXMin'] -and
                           $Template.PSObject.Properties['deliveryAddressYRange']
     $xAddrMin = if ($hasDeliveryAddrCfg) { $Template.deliveryAddressXMin } else { 9999 }
@@ -611,6 +665,7 @@ function Get-PdfOrderData {
     # qty nudged 1px off its code by a wrapped description is no longer dropped.
     $refRows  = @{}   # "P{page}_{bottom}" -> [PSCustomObject]@{ Ref; Page; Bottom }
     $qtyList  = [System.Collections.Generic.List[object]]::new()
+    $artList  = [System.Collections.Generic.List[object]]::new()   # Code Article words (if configured)
     $addrRows = @{}  # delivery address words grouped by Bottom row
     $pageNum  = 0
 
@@ -630,6 +685,9 @@ function Get-PdfOrderData {
                 }
                 if ($l -ge $xQty[0] -and $l -le $xQty[1] -and $word.Text -match $qtyPat) {
                     $qtyList.Add([PSCustomObject]@{ Page = $pageNum; Bottom = $b; Text = $word.Text })
+                }
+                if ($xArt -and $l -ge $xArt[0] -and $l -le $xArt[1] -and $word.Text -match $artPat) {
+                    $artList.Add([PSCustomObject]@{ Page = $pageNum; Bottom = $b; Text = $word.Text })
                 }
             }
 
@@ -692,7 +750,7 @@ function Get-PdfOrderData {
         }
     }
 
-    # Pair each qty word to the nearest code-row on the same page within tolerance.
+    # Pair each qty word, and each Code Article word, to the nearest code-row on the same page.
     $rowTol = 3
     foreach ($q in $qtyList) {
         $cand = $refRows.Values |
@@ -703,22 +761,46 @@ function Get-PdfOrderData {
             $cand | Add-Member -NotePropertyName Qty -NotePropertyValue $q.Text
         }
     }
+    foreach ($a in $artList) {
+        $cand = $refRows.Values |
+            Where-Object { $_.Page -eq $a.Page -and [Math]::Abs($_.Bottom - $a.Bottom) -le $rowTol } |
+            Sort-Object { [Math]::Abs($_.Bottom - $a.Bottom) } |
+            Select-Object -First 1
+        if ($cand -and -not $cand.PSObject.Properties['Art']) {
+            $cand | Add-Member -NotePropertyName Art -NotePropertyValue $a.Text
+        }
+    }
 
-    # Resolve codes: mapping.json override -> exact BC match -> unique hyphen-insensitive match.
-    # Unresolved codes are collected so the caller diverts them to the amber 'unrecognised items'
-    # alert instead of creating an order whose line POSTs all fail.
+    # Resolve codes. When a Code Article column is configured, resolve each row by its Code Article
+    # via BC customer item references FIRST (authoritative — immune to supplier-ref truncation/
+    # ambiguity), then fall back to the supplier-ref column: mapping.json -> exact BC match ->
+    # unique hyphen-insensitive match. Unresolved codes are collected so the caller diverts them to
+    # the amber 'unrecognised items' alert instead of creating an order whose line POSTs all fail.
     $mapping = $null
     if (Test-Path $mapPath) { $mapping = Get-Content $mapPath | ConvertFrom-Json }
     $exactSet = @{}
     foreach ($n in $BcItemNumbers) { if ($n) { $exactSet[$n] = $n } }
     $normIndex = Build-NormalizedItemIndex -BcItemNumbers $BcItemNumbers
 
+    $custRefMap = @{}
+    if ($xArt -and $Template.PSObject.Properties['customerNumber'] -and $Template.customerNumber) {
+        $custRefMap = Get-CustomerItemReferences -CustomerNumber $Template.customerNumber -Environment $Template.environment
+    }
+
     $lines        = @()
     $unknownCodes = @()
     $seenUnknown  = [System.Collections.Generic.HashSet[string]]::new()
     foreach ($r in ($refRows.Values | Sort-Object Page, @{ Expression = 'Bottom'; Descending = $true })) {
         if (-not $r.PSObject.Properties['Qty']) { continue }
-        $resolved = Resolve-ItemCode -Code $r.Ref -ExactSet $exactSet -NormalizedIndex $normIndex -Mapping $mapping
+        $resolved = $null
+        $artCode  = if ($r.PSObject.Properties['Art']) { $r.Art } else { '' }
+        if ($artCode) {
+            $ak = Normalize-RefNo $artCode
+            if ($custRefMap.ContainsKey($ak)) { $resolved = $custRefMap[$ak] }
+        }
+        if (-not $resolved) {
+            $resolved = Resolve-ItemCode -Code $r.Ref -ExactSet $exactSet -NormalizedIndex $normIndex -Mapping $mapping
+        }
         if ($resolved) {
             $lines += [PSCustomObject]@{ ItemNumber = $resolved; Quantity = [double]($r.Qty -replace ',', '.') }
         } elseif ($seenUnknown.Add($r.Ref)) {
