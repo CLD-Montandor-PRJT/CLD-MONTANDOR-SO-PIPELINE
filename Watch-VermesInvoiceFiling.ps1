@@ -168,8 +168,16 @@ try {
     foreach ($m in $msgs) {
         $ageDays = ([DateTime]::UtcNow - [DateTime]$m.receivedDateTime).TotalDays
         $atts = (Invoke-RestMethod -Uri "$graphBase/messages/$($m.id)/attachments?`$select=id,name,contentType,size" -Headers $graphHeader).value
-        $pdfs = @($atts | Where-Object { $_.name -match '\.pdf$' -or $_.contentType -eq 'application/pdf' })
-        if ($pdfs.Count -eq 0) { continue }
+        $allPdfs = @($atts | Where-Object { $_.name -match '\.pdf$' -or $_.contentType -eq 'application/pdf' })
+        # Only treat actual Vermes invoice PDFs (e.g. "Verkoopfactuur 26006472.pdf") as fileable;
+        # this skips non-invoice PDFs that arrive from the same sender (payment advices, forwarded
+        # customer invoices, etc.) silently — no alert noise.
+        $invoicePat = if ($cfg.PSObject.Properties['invoiceFilePattern'] -and $cfg.invoiceFilePattern) { $cfg.invoiceFilePattern } else { '^Verkoopfactuur' }
+        $pdfs = @($allPdfs | Where-Object { $_.name -match $invoicePat })
+        if ($pdfs.Count -eq 0) {
+            if ($allPdfs.Count -gt 0) { Write-Host "  [SKIP] '$($m.subject)' — no Vermes invoice PDF (only: $(@($allPdfs | ForEach-Object { $_.name }) -join ', '))." -ForegroundColor DarkGray }
+            continue
+        }
 
         foreach ($pdf in $pdfs) {
             Write-Host "  [$($m.receivedDateTime)] '$($m.subject)' :: $($pdf.name)"

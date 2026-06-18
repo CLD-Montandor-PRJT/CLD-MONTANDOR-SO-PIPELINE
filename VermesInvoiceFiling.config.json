@@ -2,6 +2,7 @@
   "mailbox": "administration@montandor.com",
   "folderHint": "Invoices",
   "sender": "finance.dept@vermes.nl",
+  "invoiceFilePattern": "^Verkoopfactuur",
   "environment": "Production",
   "vendorNumber": "400.041",
   "yourRefRegex": "Your\\s*Ref\\.?\\s*:?\\s*([A-Za-z0-9][A-Za-z0-9\\-/]*)",
