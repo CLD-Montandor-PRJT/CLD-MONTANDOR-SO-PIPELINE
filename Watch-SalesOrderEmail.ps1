@@ -410,17 +410,33 @@ foreach ($msg in $msgs.value) {
                 # Text-mode unrecognised Ref Fournisseur codes (detected at extraction, never attempted as lines).
                 $unknownItems = @(if ($data.PSObject.Properties['UnknownCodes']) { $data.UnknownCodes })
 
+                # Code Article clients (e.g. In Situ) carry the customer's Code Article alongside the
+                # truncated supplier ref. When present, render the actionable Code Article + a
+                # "add a BC Item Reference" instruction instead of the raw supplier-ref code.
+                $isArticleClient  = [bool]$tpl.PSObject.Properties['articleCodeXRange']
+                $unknownArticles  = @(if ($data.PSObject.Properties['UnknownArticles']) { $data.UnknownArticles })
+                $unknownHtmlParts = if ($unknownArticles.Count -gt 0) {
+                    @($unknownArticles | ForEach-Object { Format-UnknownArticleHtml -Article $_.Article -Ref $_.Ref -BcItemNumbers $bcItems })
+                } else {
+                    @($unknownItems | ForEach-Object { Format-UnknownCodeHtml -Code $_ -BcItemNumbers $bcItems })
+                }
+                $refInstruction = if ($isArticleClient) {
+                    "Add a <strong>Customer Item Reference</strong> in BC for the Code Article(s) above (Item References on customer <strong>$($tpl.customerNumber)</strong>), pointing to the correct item."
+                } else {
+                    "Create the item(s) in BC."
+                }
+
                 if ($data.Lines.Count -eq 0) {
                     # Nothing recognisable to post — do NOT create an empty order. Treat as retryable so
                     # the next run picks it up (e.g. once the missing items are created in BC).
                     $codeList = if ($unknownItems.Count -gt 0) { $unknownItems -join ', ' } else { '(no item lines could be extracted from the PDF)' }
-                    $codeListHtml = if ($unknownItems.Count -gt 0) {
-                        ($unknownItems | ForEach-Object { Format-UnknownCodeHtml -Code $_ -BcItemNumbers $bcItems }) -join '<br>'
+                    $codeListHtml = if ($unknownHtmlParts.Count -gt 0) {
+                        $unknownHtmlParts -join '<br>'
                     } else { '(no item lines could be extracted from the PDF)' }
                     Write-Host "    [STOP] No postable lines — order not posted, will retry: $codeList" -ForegroundColor Red
                     $emailOk = $false
                     $body = (Build-InfoBox ([ordered]@{ 'Client' = $tpl.clientName; 'Order ref' = $data.OrderRef; 'From' = $senderEmail; 'Email' = $msg.subject })) +
-                            (Build-AlertBox -Message "No items on this order could be matched to BC, so <strong>nothing was posted</strong>.<br><br>Unrecognised reference(s):<br><strong>$codeListHtml</strong><br><br>Create the item(s) in BC — the order will be posted automatically on the next watcher run." -Bg '#f8d7da' -Fg '#721c24' -Border '#f5c6cb')
+                            (Build-AlertBox -Message "No items on this order could be matched to BC, so <strong>nothing was posted</strong>.<br><br>Unresolved reference(s):<br><strong>$codeListHtml</strong><br><br>$refInstruction The order will be posted automatically on the next watcher run." -Bg '#f8d7da' -Fg '#721c24' -Border '#f5c6cb')
                     Send-NotificationEmail `
                         -Subject     "[Sales Order] Order not posted — $($tpl.clientName) ref $($data.OrderRef)" `
                         -AlsoNotify  @('x.planchette@montandor.com') `
@@ -437,11 +453,14 @@ foreach ($msg in $msgs.value) {
                     # at POST. The order IS posted; this is an informational amber alert. Not retried.
                     $skippedAll = @($unknownItems) + @($result.SkippedLines)
                     if ($skippedAll.Count -gt 0) {
-                        $skipList = (@($unknownItems | ForEach-Object { Format-UnknownCodeHtml -Code $_ -BcItemNumbers $bcItems }) +
+                        $skipList = (@($unknownHtmlParts) +
                                      @($result.SkippedLines | ForEach-Object { [System.Net.WebUtility]::HtmlEncode($_) })) -join '<br>'
+                        $recurNote = if ($isArticleClient -and $unknownArticles.Count -gt 0) {
+                            "<br><br>To stop this recurring, $($refInstruction.Substring(0,1).ToLower() + $refInstruction.Substring(1))"
+                        } else { '' }
                         Write-Host "    [NOTIFY] $($skippedAll.Count) line(s) skipped — order posted as $bcNo." -ForegroundColor Yellow
                         $sbody = (Build-InfoBox ([ordered]@{ 'Client' = $tpl.clientName; 'Order ref' = $data.OrderRef; 'BC order' = "<strong>$bcNo</strong>"; 'From' = $senderEmail; 'Email' = $msg.subject })) +
-                                 (Build-AlertBox -Message "Order <strong>$bcNo</strong> was posted, but the following reference(s) could <strong>not</strong> be matched to a BC item and were <strong>skipped</strong>:<br><br><strong>$skipList</strong><br><br>If these belong on the order, add them manually in BC &mdash; they will <strong>not</strong> be added automatically.")
+                                 (Build-AlertBox -Message "Order <strong>$bcNo</strong> was posted, but the following reference(s) could <strong>not</strong> be matched to a BC item and were <strong>skipped</strong>:<br><br><strong>$skipList</strong><br><br>If these belong on the order, add them manually in BC &mdash; they will <strong>not</strong> be added automatically.$recurNote")
                         Send-NotificationEmail `
                             -Subject     "[Sales Order] Lines skipped — $($tpl.clientName) order $bcNo" `
                             -AlsoNotify  @('x.planchette@montandor.com') `

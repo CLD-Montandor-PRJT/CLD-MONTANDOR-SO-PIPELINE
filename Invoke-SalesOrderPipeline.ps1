@@ -372,6 +372,23 @@ function Format-UnknownCodeHtml {
     return $enc
 }
 
+# Format one unresolved line for a Code Article client (e.g. In Situ): surface the customer's
+# Code Article (the actionable key — supcom adds a BC Customer Item Reference for it), with a
+# likely-item hint derived from the truncated supplier ref. Falls back to the supplier-ref format
+# when no Code Article was captured for the row.
+function Format-UnknownArticleHtml {
+    param([string]$Article, [string]$Ref, [string[]]$BcItemNumbers)
+    if (-not $Article) { return (Format-UnknownCodeHtml -Code $Ref -BcItemNumbers $BcItemNumbers) }
+    $artEnc = [System.Net.WebUtility]::HtmlEncode($Article)
+    $refEnc = [System.Net.WebUtility]::HtmlEncode($Ref)
+    $sug    = @(Get-ItemSuggestion -Code $Ref -BcItemNumbers $BcItemNumbers)
+    $hint   = if ($sug.Count -gt 0) {
+        $s = ($sug | ForEach-Object { [System.Net.WebUtility]::HtmlEncode($_) }) -join ', '
+        " &nbsp;&mdash;&nbsp; likely one of: <em>$s</em>"
+    } else { '' }
+    return "Code Article <strong>$artEnc</strong> (PDF r&eacute;f. &lsquo;$refEnc&rsquo;)$hint"
+}
+
 # ---------------------------------------------------------------------------
 # PDF extraction (coordinate-based)
 # ---------------------------------------------------------------------------
@@ -787,9 +804,10 @@ function Get-PdfOrderData {
         $custRefMap = Get-CustomerItemReferences -CustomerNumber $Template.customerNumber -Environment $Template.environment
     }
 
-    $lines        = @()
-    $unknownCodes = @()
-    $seenUnknown  = [System.Collections.Generic.HashSet[string]]::new()
+    $lines           = @()
+    $unknownCodes    = @()
+    $unknownArticles = @()
+    $seenUnknown     = [System.Collections.Generic.HashSet[string]]::new()
     foreach ($r in ($refRows.Values | Sort-Object Page, @{ Expression = 'Bottom'; Descending = $true })) {
         if (-not $r.PSObject.Properties['Qty']) { continue }
         $resolved = $null
@@ -803,8 +821,9 @@ function Get-PdfOrderData {
         }
         if ($resolved) {
             $lines += [PSCustomObject]@{ ItemNumber = $resolved; Quantity = [double]($r.Qty -replace ',', '.') }
-        } elseif ($seenUnknown.Add($r.Ref)) {
-            $unknownCodes += $r.Ref
+        } elseif ($seenUnknown.Add("$artCode|$($r.Ref)")) {
+            $unknownCodes    += $r.Ref
+            $unknownArticles += [PSCustomObject]@{ Article = $artCode; Ref = $r.Ref }
         }
     }
 
@@ -816,6 +835,7 @@ function Get-PdfOrderData {
         ShipToPostCode = ''
         Lines          = $lines
         UnknownCodes   = $unknownCodes
+        UnknownArticles = $unknownArticles
     }
 }
 
