@@ -65,6 +65,42 @@ function Get-PdfAttachmentBytes {
 }
 
 # ---------------------------------------------------------------------------
+# Decide how to handle an email that was routed to a client but has no PDF attachment.
+# Replaces the previous silent [SKIP] (see incident GAFIC PO2607-000071, 2026-07-01, sent
+# as .odt — no PDF, no alert, order never attempted). Text-mode clients get a chance to
+# extract from a supported office document (.odt/.docx) via the SAME text-extraction rules
+# as PDFs (Get-TextModeOrderData). Coordinate-mode clients never attempt office-doc
+# extraction (their extraction is PDF-word-coordinate based and has no text equivalent) —
+# and any unsupported format (.doc/.rtf/images/scans) always falls through to notify.
+# ---------------------------------------------------------------------------
+function Get-NonPdfAttachmentAction {
+    <#
+    .SYNOPSIS
+        Routing decision for a no-PDF-attachment email.
+    .PARAMETER IsTextMode
+        Whether the routed client's template uses extractionMode "text".
+    .PARAMETER Attachments
+        Non-inline attachment objects for this email (each needs .name and .isInline).
+        Inline attachments (e.g. embedded signature images) are never extraction candidates.
+    .OUTPUTS
+        PSCustomObject with:
+          Action     - 'ExtractOfficeDoc' | 'NotifyUnsupported'
+          Attachment - the chosen office-document attachment (ExtractOfficeDoc only), else $null
+    .EXAMPLE
+        Get-NonPdfAttachmentAction -IsTextMode $true -Attachments $nonInlineAtts
+    #>
+    param(
+        [bool]$IsTextMode,
+        [object[]]$Attachments = @()
+    )
+    $officeDocs = @($Attachments | Where-Object { -not $_.isInline -and $_.name -match '\.(odt|docx)$' })
+    if ($IsTextMode -and $officeDocs.Count -gt 0) {
+        return [PSCustomObject]@{ Action = 'ExtractOfficeDoc'; Attachment = $officeDocs[0] }
+    }
+    return [PSCustomObject]@{ Action = 'NotifyUnsupported'; Attachment = $null }
+}
+
+# ---------------------------------------------------------------------------
 # Send a plain-text notification email to supcom@montandor.com via Graph API
 # ---------------------------------------------------------------------------
 function Send-NotificationEmail {
@@ -124,6 +160,59 @@ function Build-AmbiguousPostcodeHtml {
     $info   = Build-InfoBox $fields
     $alert  = Build-AlertBox "Postcode <strong>$PostCode</strong> matches multiple ship-to addresses. Please post this order manually in BC."
     return Build-HtmlShell -Title 'Delivery postcode matches multiple ship-to addresses' -Subtitle 'This order has not been posted and requires manual action.' -Body "$info$alert"
+}
+
+function Build-UnsupportedAttachmentHtml {
+    <#
+    .SYNOPSIS
+        Notification body for an email with no usable PDF/office-document attachment.
+    .DESCRIPTION
+        Replaces the previous SILENT [SKIP] (no alert sent) for emails with no PDF
+        attachment — see incident GAFIC PO2607-000071, 2026-07-01, sent as .odt and never
+        attempted. Fires whenever the routed sender's email cannot be turned into an order:
+        coordinate-mode clients with any non-PDF attachment, text-mode clients whose office
+        document (.odt/.docx) failed to extract a usable order, or any unsupported format
+        (.doc/.rtf/images/scans).
+    #>
+    param(
+        [string]$ClientName,
+        [string]$SenderEmail,
+        [string]$EmailSubject,
+        [string[]]$FileNames    = @(),
+        [string[]]$ContentTypes = @()
+    )
+    $fileRows = for ($i = 0; $i -lt $FileNames.Count; $i++) {
+        $ct = if ($i -lt $ContentTypes.Count) { $ContentTypes[$i] } else { '(unknown)' }
+        "<tr><td style='padding:4px 12px 4px 0'>$([System.Net.WebUtility]::HtmlEncode($FileNames[$i]))</td><td style='padding:4px 0;color:#666'>$([System.Net.WebUtility]::HtmlEncode($ct))</td></tr>"
+    }
+    $fileTable = "<table style='font-size:13px;border:none;margin-top:4px'>$($fileRows -join '')</table>"
+    $fields = [ordered]@{ 'Client' = $ClientName; 'From' = $SenderEmail; 'Email' = $EmailSubject; 'Attachment(s)' = $fileTable }
+    $info   = Build-InfoBox $fields
+    $alert  = Build-AlertBox "No usable purchase order could be extracted from this email's attachment(s). Please enter this order into BC manually." -Bg '#f8d7da' -Fg '#721c24' -Border '#f5c6cb'
+    return Build-HtmlShell -Title 'Unsupported attachment — manual entry needed' -Subtitle 'This order has not been posted and requires manual action.' -Body "$info$alert"
+}
+
+function Send-UnsupportedAttachmentNotification {
+    <#
+    .SYNOPSIS
+        Sends the "unsupported attachment" alert to supcom + Xavier. Never a silent skip.
+    .DESCRIPTION
+        Thin wrapper around Build-UnsupportedAttachmentHtml + Send-NotificationEmail so the
+        exact subject line and recipient list are defined in exactly one place and are
+        independently testable (Send-NotificationEmail is stubbed in tests — no real send).
+    #>
+    param(
+        [string]$ClientName,
+        [string]$SenderEmail,
+        [string]$EmailSubject,
+        [string[]]$FileNames    = @(),
+        [string[]]$ContentTypes = @()
+    )
+    Send-NotificationEmail `
+        -Subject     '[Sales Order] Unsupported attachment — manual entry needed' `
+        -AlsoNotify  @('x.planchette@montandor.com') `
+        -Body        (Build-UnsupportedAttachmentHtml -ClientName $ClientName -SenderEmail $SenderEmail -EmailSubject $EmailSubject -FileNames $FileNames -ContentTypes $ContentTypes) `
+        -ContentType 'HTML'
 }
 
 function Build-ProcessingErrorHtml {
@@ -296,23 +385,77 @@ foreach ($msg in $msgs.value) {
         -Headers $graphHeader
     $pdfAtts = @($atts.value | Where-Object { -not $_.isInline -and ($_.contentType -match 'pdf' -or $_.name -match '\.pdf$') })
 
-    if ($pdfAtts.Count -eq 0) {
-        Write-Host "  [SKIP] No PDF attachments in this email." -ForegroundColor Yellow
-        $skipped++
-        continue
-    }
-
     $isTextMode = $tpl.PSObject.Properties['extractionMode'] -and $tpl.extractionMode -eq 'text'
     $bcItems    = @(Get-BcItemNumbers -Environment $tpl.environment)
     $emailOk    = $true
 
-    foreach ($att in $pdfAtts) {
-        Write-Host "  PDF: $($att.name) ($([Math]::Round($att.size/1KB, 1)) KB)"
+    # Sources to attempt extraction on this run: PDF attachments (existing path), or — when
+    # there is no PDF — a single office document (.odt/.docx) for text-mode clients only.
+    # Replaces the previous SILENT [SKIP] when no PDF attachment was found (no alert sent —
+    # see incident GAFIC PO2607-000071, 2026-07-01, sent as .odt and never attempted). A
+    # coordinate-mode client, an unsupported format (.doc/.rtf/images/scans), or zero
+    # attachments now always reaches Send-UnsupportedAttachmentNotification instead.
+    $sourceAtts = @($pdfAtts | ForEach-Object { [PSCustomObject]@{ Kind = 'pdf'; Att = $_ } })
+
+    if ($sourceAtts.Count -eq 0) {
+        $nonInlineAtts = @($atts.value | Where-Object { -not $_.isInline })
+        $route = Get-NonPdfAttachmentAction -IsTextMode $isTextMode -Attachments $nonInlineAtts
+        if ($route.Action -eq 'ExtractOfficeDoc') {
+            $sourceAtts = @([PSCustomObject]@{ Kind = 'office'; Att = $route.Attachment })
+        } else {
+            Write-Host "  [NOTIFY] No PDF attachment and no usable office document — sending manual-entry alert (never a silent skip)." -ForegroundColor Yellow
+            Send-UnsupportedAttachmentNotification -ClientName $tpl.clientName -SenderEmail $senderEmail -EmailSubject $msg.subject `
+                -FileNames    (@($nonInlineAtts | ForEach-Object { $_.name })) `
+                -ContentTypes (@($nonInlineAtts | ForEach-Object { $_.contentType }))
+            $skipped++
+            continue
+        }
+    }
+
+    foreach ($src in $sourceAtts) {
+        $att = $src.Att
+        Write-Host "  $($src.Kind.ToUpper()): $($att.name) ($([Math]::Round($att.size/1KB, 1)) KB)"
         try {
-            $pdfBytes = Get-PdfAttachmentBytes -MessageId $msg.id -AttachmentId $att.id
+            # Get-PdfAttachmentBytes is a generic Graph attachment-content fetch by ID — the name
+            # predates this feature but the call works unchanged for office-doc attachments too.
+            $srcBytes = Get-PdfAttachmentBytes -MessageId $msg.id -AttachmentId $att.id
             [System.GC]::Collect()
             [System.GC]::WaitForPendingFinalizers()
-            $data = Get-PdfOrderData -PdfBytes $pdfBytes -Template $tpl -BcItemNumbers $bcItems -ClientDir $clientDir
+
+            if ($src.Kind -eq 'pdf') {
+                $data = Get-PdfOrderData -PdfBytes $srcBytes -Template $tpl -BcItemNumbers $bcItems -ClientDir $clientDir
+            } else {
+                $officeText = Get-OfficeDocText -FileBytes $srcBytes -FileName $att.name
+                if (-not $officeText) {
+                    Write-Host "    [NOTIFY] Office document could not be read as text — sending manual-entry alert." -ForegroundColor Yellow
+                    Send-UnsupportedAttachmentNotification -ClientName $tpl.clientName -SenderEmail $senderEmail -EmailSubject $msg.subject `
+                        -FileNames @($att.name) -ContentTypes @($att.contentType)
+                    continue
+                }
+
+                # Order ref / order date: identical regexes to Get-PdfOrderData's preamble, run
+                # here against office-doc text instead of PdfPig's page text.
+                $officeOrderRef = ''
+                if ($tpl.PSObject.Properties['orderNumberRegex'] -and $officeText -match $tpl.orderNumberRegex) {
+                    $officeOrderRef = $Matches[1]
+                }
+                $officeOrderDateBC = (Get-Date).ToString('yyyy-MM-dd')
+                if ($officeText -match $tpl.dateRegex) {
+                    $parsed = [DateTime]::ParseExact($Matches[1], $tpl.dateInputFormat, [System.Globalization.CultureInfo]::InvariantCulture)
+                    $officeOrderDateBC = $parsed.ToString('yyyy-MM-dd')
+                }
+                $officeMapPath = Join-Path $clientDir 'mapping.json'
+                $data = Get-TextModeOrderData -AllText $officeText -Template $tpl -BcItemNumbers $bcItems `
+                    -MapPath $officeMapPath -OrderRef $officeOrderRef -OrderDateBC $officeOrderDateBC
+
+                if (-not $data.OrderRef -or @($data.Lines).Count -eq 0) {
+                    Write-Host "    [NOTIFY] Office document did not yield a usable order — sending manual-entry alert." -ForegroundColor Yellow
+                    Send-UnsupportedAttachmentNotification -ClientName $tpl.clientName -SenderEmail $senderEmail -EmailSubject $msg.subject `
+                        -FileNames @($att.name) -ContentTypes @($att.contentType)
+                    continue
+                }
+            }
+            $pdfBytes = $srcBytes   # downstream (Submit-SalesOrder) attaches whatever source file it was given, PDF or office document
 
             # Ship-to lookup for text-mode clients
             $shipToCode = ''

@@ -390,6 +390,326 @@ function Format-UnknownArticleHtml {
 }
 
 # ---------------------------------------------------------------------------
+# Office-document text extraction (.odt / .docx) — used when a routed sender sends a
+# purchase order as an OpenDocument/Word file instead of a PDF (e.g. GAFIC PO2607-000071,
+# 2026-07-01). Both formats are ZIP containers; strip tags after inserting whitespace at
+# paragraph/cell/row boundaries so words from adjacent cells don't glue together. Returns
+# $null for unsupported extensions or unreadable archives so callers fall back to the
+# "notify — manual entry needed" path instead of throwing.
+# ---------------------------------------------------------------------------
+function Get-OfficeDocText {
+    <#
+    .SYNOPSIS
+        Extracts plain text from a .odt or .docx office document.
+    .DESCRIPTION
+        Opens the file as a ZIP archive (System.IO.Compression) and reads its main text part
+        (content.xml for .odt, word/document.xml for .docx). Paragraph/cell/row boundary tags
+        are replaced with a space before stripping remaining XML tags, so text from adjacent
+        table cells or paragraphs does not glue together into one unbroken word. The resulting
+        text is fed through the SAME text-mode extraction rules as PDF text (Get-TextModeOrderData)
+        via Get-PdfOrderData's routing — no separate extraction logic to drift out of sync.
+    .PARAMETER FileBytes
+        Raw bytes of the office document.
+    .PARAMETER FileName
+        Original file name, used only to determine format by extension.
+    .EXAMPLE
+        Get-OfficeDocText -FileBytes $bytes -FileName 'PO2607-000071.odt'
+    #>
+    param(
+        [byte[]]$FileBytes,
+        [string]$FileName
+    )
+
+    $ext = [System.IO.Path]::GetExtension($FileName).ToLowerInvariant()
+    if ($ext -ne '.odt' -and $ext -ne '.docx') { return $null }
+
+    $entryName = if ($ext -eq '.odt') { 'content.xml' } else { 'word/document.xml' }
+    $breakTags = if ($ext -eq '.odt') {
+        '</text:p>|</text:h>|</table:table-cell>|</table:table-row>|<text:line-break\s*/?>|<text:tab\s*/?>'
+    } else {
+        '</w:p>|</w:tr>|<w:br\s*/?>|<w:tab\s*/?>'
+    }
+
+    $xml = $null
+    try {
+        $ms = [System.IO.MemoryStream]::new($FileBytes)
+        try {
+            $zip = [System.IO.Compression.ZipArchive]::new($ms, [System.IO.Compression.ZipArchiveMode]::Read)
+            try {
+                $entry = $zip.GetEntry($entryName)
+                if (-not $entry) { return $null }
+                $reader = [System.IO.StreamReader]::new($entry.Open())
+                try   { $xml = $reader.ReadToEnd() }
+                finally { $reader.Dispose() }
+            } finally { $zip.Dispose() }
+        } finally { $ms.Dispose() }
+    } catch {
+        return $null   # not a valid ZIP / not a real office document — caller falls back to notify
+    }
+    if (-not $xml) { return $null }
+
+    $spaced = $xml -replace "(?:$breakTags)", ' '
+    $text   = $spaced -replace '<[^>]+>', ' '
+    $text   = $text -replace '&amp;', '&' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&quot;', '"' -replace '&apos;', "'"
+    $text   = $text -replace '\s+', ' '
+    return $text.Trim()
+}
+
+# ---------------------------------------------------------------------------
+# Text-mode order extraction — shared by the PDF path (Get-PdfOrderData, text passed in
+# as PdfPig's glued page text) and the office-document path (Watch-SalesOrderEmail.ps1's
+# no-PDF-attachment handling, text passed in from Get-OfficeDocText). Kept as a single
+# function so the two paths' extraction rules cannot drift apart.
+# ---------------------------------------------------------------------------
+function Get-TextModeOrderData {
+    <#
+    .SYNOPSIS
+        Extracts order lines/ship-to/dates from already-acquired plain text, per a
+        text-mode client template (GAFIC/CR Distribution/Aligro-Demaurex qty variants).
+    .PARAMETER AllText
+        The full document text — either PdfPig's glued page text (PDF path) or
+        Get-OfficeDocText's output (office-document path). Both are treated identically:
+        the qtyUnit pattern below tolerates zero or more whitespace between code/qty/unit,
+        covering PdfPig's zero-space word-join artifact AND office documents' real spaces.
+    .PARAMETER Template
+        The client's template.json, already parsed.
+    .PARAMETER BcItemNumbers
+        Known BC item numbers for this environment, used to build the exact-match lookup.
+    .PARAMETER MapPath
+        Path to the client's mapping.json (code rename table). May not exist.
+    .PARAMETER OrderRef
+        Order reference already extracted from the text by the caller (regex is identical
+        for both PDF and office-doc paths, so callers compute it once up front).
+    .PARAMETER OrderDateBC
+        Order date already extracted from the text by the caller, same rationale as OrderRef.
+    #>
+    param(
+        [string]$AllText,
+        [PSCustomObject]$Template,
+        [string[]]$BcItemNumbers = @(),
+        [string]$MapPath = '',
+        [string]$OrderRef = '',
+        [string]$OrderDateBC = ''
+    )
+
+    # Delivery date
+    $deliveryDateBC = ''
+    if ($Template.PSObject.Properties['deliveryDateRegex'] -and
+        $AllText -match $Template.deliveryDateRegex) {
+        $parsed = [DateTime]::ParseExact(
+            $Matches[1], $Template.dateInputFormat,
+            [System.Globalization.CultureInfo]::InvariantCulture)
+        $deliveryDateBC = $parsed.ToString('yyyy-MM-dd')
+    }
+
+    # Item lines: single pass over the text in document order to preserve line sequence
+    $itemLookup = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($itemNo in $BcItemNumbers) {
+        if (-not $itemLookup.ContainsKey($itemNo)) { $itemLookup[$itemNo] = $itemNo }
+    }
+    if (Test-Path $MapPath) {
+        $renames = Get-Content $MapPath | ConvertFrom-Json
+        foreach ($prop in $renames.PSObject.Properties) {
+            $itemLookup[$prop.Name] = $prop.Value
+            if ($prop.Name -ne $prop.Value -and $itemLookup.ContainsKey($prop.Value)) {
+                $itemLookup.Remove($prop.Value)
+            }
+        }
+    }
+    $lines        = @()
+    $unknownCodes = @()
+    $seenItems    = [System.Collections.Generic.HashSet[string]]::new()
+
+    if ($Template.PSObject.Properties['qtyBeforeCode'] -and $Template.qtyBeforeCode) {
+        # Qty-before-code mode (e.g. Aligro-Demaurex: "54x    2PI...ITEM_CODE 2 PI").
+        # The ordered quantity (54) precedes the item code in the row as {N}x.
+        #
+        # Pattern: \s\d{2,3}\d{6}\s*(\d{1,4})x
+        # Anchors on the full row structure: space + 2-3 digit Pos + 6-digit NoArt + qty.
+        # A naive \d{6}\s*(\d{1,4})x matches at offset inside "200443674100x", yielding
+        # qty=4100 instead of 100. Including the Pos prefix pins the match to row starts.
+        # Dimensions ("60x115cm") and pack labels ("7x") in descriptions are never
+        # preceded by a space+Pos+NoArt sequence — they are never matched.
+        #
+        # (?<![A-Z\-]) on codes prevents substring matches (SMA510-WT inside BL-SMA510-WT)
+        # while allowing codes that follow a digit in a description (e.g. "A4MC-BRA4-WR").
+        $qtyPositions = @([regex]::Matches($AllText, '\s\d{2,3}\d{6}\s*(\d{1,4})x') | ForEach-Object {
+            [PSCustomObject]@{ Idx = $_.Index; Qty = [double]$_.Groups[1].Value }
+        })
+        $codeHits = @{}
+        foreach ($code in $itemLookup.Keys) {
+            $m = [regex]::Match($AllText, '(?<![A-Z\-])' + [regex]::Escape($code))
+            if ($m.Success) {
+                $preceding = @($qtyPositions | Where-Object { $_.Idx -lt $m.Index }) | Select-Object -Last 1
+                if ($preceding) { $codeHits[$code] = @{ Idx = $m.Index; Qty = $preceding.Qty } }
+            }
+        }
+        foreach ($code in ($codeHits.Keys | Sort-Object { $codeHits[$_].Idx })) {
+            $mapped = $itemLookup[$code]
+            if ($seenItems.Add($mapped)) {
+                $lines += [PSCustomObject]@{
+                    ItemNumber = $mapped
+                    Quantity   = $codeHits[$code].Qty
+                }
+            }
+        }
+        # Detect codes in Réf.Fourn. column not matched to BC — code followed by pack qty + unit.
+        # Two false-positive guards:
+        #   - Require hyphen in code (filters header/address text like "OFICINA 21140 AV")
+        #   - Require code is not a suffix match of a known BC code (filters "A4MC-CBA4-BR"
+        #     which is description "A4" concatenated with the known code "MC-CBA4-BR")
+        $seenUnknown = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($m in [regex]::Matches($AllText, '(?<![A-Z\-])([A-Z][A-Z0-9\-]{2,})\s+\d+\s+[A-Z]{2,3}')) {
+            $code = $m.Groups[1].Value
+            if ($code -notmatch '-') { continue }
+            if (-not $codeHits.ContainsKey($code) -and $seenUnknown.Add($code)) {
+                $isSuffix = $codeHits.Keys | Where-Object { $code.EndsWith($_, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+                if (-not $isSuffix) { $unknownCodes += $code }
+            }
+        }
+    } elseif ($Template.PSObject.Properties['qtyUnit'] -and $Template.qtyUnit) {
+        # Integer+unit qty mode (e.g. GAFIC: 8PCE, 18PQT).
+        # A general pattern would greedily absorb quantity digits into the code (ELE-BL-LA12PCE
+        # becomes code=ELE-BL-LA1, qty=2). Per-code exact search avoids this entirely.
+        #
+        # \s* tolerates BOTH: PdfPig's zero-space word-join artifact between code/qty/unit on
+        # the PDF path (BL-SMA510-RD1PCE), and office documents' real inter-cell spaces on the
+        # .odt/.docx path (BL-SMA510-RD 1 PCE) — one pattern, both sources, per Get-OfficeDocText.
+        #
+        # (?<![A-Z\-]) on the code prevents substring matches (e.g. SMA510-RD matching inside
+        # BL-SMA510-RD — both are real, distinct BC items; see incident PO2607-000071 2026-07-01)
+        # while allowing codes that follow a digit in a description (e.g. "A4MC-BRA4-WR"), same
+        # guard as the qtyBeforeCode mode above.
+        $unitPat  = $Template.qtyUnit
+        $recover  = $Template.PSObject.Properties['recoverFromDesignation'] -and $Template.recoverFromDesignation
+        $codeHits = @{}
+        foreach ($code in $itemLookup.Keys) {
+            $m = [regex]::Match($AllText, '(?<![A-Z\-])' + [regex]::Escape($code) + "\s*(\d+)\s*(?:$unitPat)")
+            if ($m.Success) { $codeHits[$code] = @{ Idx = $m.Index; Qty = $m.Groups[1].Value } }
+        }
+
+        # Collect line records carrying text position, so any line recovered from the Désignation
+        # (below) sorts back into document order alongside the per-code matches.
+        $lineRecs = @()
+        foreach ($code in $codeHits.Keys) {
+            $mapped = $itemLookup[$code]
+            if ($seenItems.Add($mapped)) {
+                $lineRecs += [PSCustomObject]@{ Idx = $codeHits[$code].Idx; ItemNumber = $mapped; Quantity = [double]$codeHits[$code].Qty }
+            }
+        }
+
+        # Detect codes in VERMES# references not matched to BC — unit suffix forces correct backtracking.
+        # Position-based dedup: if a known code was already matched at the same text position, skip —
+        # the greedy regex may extract a slightly different string (e.g. ELE-M-SM1 vs ELE-M-SM) but
+        # the position overlap proves the item was already handled by the per-code exact search above.
+        $knownPositions = [System.Collections.Generic.HashSet[int]]::new()
+        foreach ($v in $codeHits.Values) { [void]$knownPositions.Add($v.Idx) }
+        $seenUnknown = [System.Collections.Generic.HashSet[string]]::new()
+        $prevIdx     = 0
+        foreach ($m in [regex]::Matches($AllText, '#([A-Z][A-Z0-9\-]+)(\d+)(?:' + $unitPat + ')')) {
+            $curIdx = $m.Index
+            if ($knownPositions.Contains($curIdx + 1)) { $prevIdx = $curIdx; continue }
+            $code = $m.Groups[1].Value
+            $qty  = $m.Groups[2].Value
+            if ($codeHits.ContainsKey($code) -or -not $seenUnknown.Add($code)) { $prevIdx = $curIdx; continue }
+
+            # Désignation recovery (GAFIC, gated by recoverFromDesignation): the Ref Fournisseur is
+            # sometimes truncated in its own column (e.g. BL-SMA100-V7) while the full BC item code
+            # appears inside the row's Désignation text (e.g. "...COLORE X7 BL-SMA100-V7-AS [14477]").
+            # Search this row's window (bounded by the previous and current VERMES# anchors) for the
+            # truncated code extended to the next space/bracket; if that fuller string is a BC item
+            # (or mapping alternative) use it. Qty comes from the VERMES# anchor. The leading Ref is
+            # glued to the description (BL-SMA100-V7FEUTRE...) so it self-rejects — only the real code matches.
+            $rec = $null
+            if ($recover) {
+                $winStart = [Math]::Max(0, $prevIdx)
+                $window   = $AllText.Substring($winStart, $curIdx - $winStart)
+                foreach ($mm in [regex]::Matches($window, [regex]::Escape($code) + '[^\s\[\]]*')) {
+                    $cand = $mm.Value
+                    if ($cand -eq $code) { continue }   # bare truncated ref — already known not in BC
+                    if ($itemLookup.ContainsKey($cand)) { $rec = $itemLookup[$cand]; break }
+                }
+            }
+            if ($rec) {
+                if ($seenItems.Add($rec)) {
+                    $lineRecs += [PSCustomObject]@{ Idx = $curIdx; ItemNumber = $rec; Quantity = [double]$qty }
+                    Write-Host "    [RECOVERED] $code -> $rec (qty $qty) from Désignation" -ForegroundColor Green
+                }
+            } else {
+                $unknownCodes += $code
+            }
+            $prevIdx = $curIdx
+        }
+
+        foreach ($r in ($lineRecs | Sort-Object Idx)) {
+            $lines += [PSCustomObject]@{ ItemNumber = $r.ItemNumber; Quantity = $r.Quantity }
+        }
+    } else {
+        # Comma-decimal qty mode (e.g. CR Distribution: 5,20) — single pass over text.
+        $seenUnknown = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($m in [regex]::Matches($AllText, '(?<![A-Z0-9\-])([A-Z][A-Z0-9\-]{2,})\s*(\d+,\d{2})')) {
+            $code = $m.Groups[1].Value
+            if ($itemLookup.ContainsKey($code)) {
+                $mapped = $itemLookup[$code]
+                if ($seenItems.Add($mapped)) {
+                    $lines += [PSCustomObject]@{
+                        ItemNumber = $mapped
+                        Quantity   = [double]($m.Groups[2].Value -replace ',', '.')
+                    }
+                }
+            } elseif ($seenUnknown.Add($code)) {
+                $unknownCodes += $code
+            }
+        }
+    }
+
+    # Delivery address (template regex fields)
+    $shipTo = $null
+    if ($Template.PSObject.Properties['deliveryNameRegex'] -and $AllText -match $Template.deliveryNameRegex) {
+        $addrName     = $Matches[1].Trim()
+        $addrLine1    = ''
+        $addrPostCode = ''
+        $addrCity     = ''
+        $addrCountry  = if ($Template.PSObject.Properties['deliveryCountry']) { $Template.deliveryCountry } else { '' }
+        if ($Template.PSObject.Properties['deliveryAddress1Regex'] -and $AllText -match $Template.deliveryAddress1Regex) {
+            $addrLine1 = $Matches[1].Trim()
+        }
+        if ($Template.PSObject.Properties['deliveryPostCodeRegex'] -and $AllText -match $Template.deliveryPostCodeRegex) {
+            $addrPostCode = $Matches[1].Trim()
+        }
+        if ($Template.PSObject.Properties['deliveryCityRegex'] -and $AllText -match $Template.deliveryCityRegex) {
+            $addrCity = ($Matches[1] -replace '\s+', ' ').Trim()
+        }
+        if ($addrName) {
+            $shipTo = [PSCustomObject]@{
+                name         = $addrName
+                addressLine1 = $addrLine1
+                addressLine2 = ''
+                city         = $addrCity
+                postCode     = $addrPostCode
+                country      = $addrCountry
+            }
+        }
+    }
+
+    # Extract postcode for BC ship-to lookup
+    $extractedPostCode = ''
+    if ($Template.PSObject.Properties['deliveryPostCodeRegex'] -and $AllText -match $Template.deliveryPostCodeRegex) {
+        $extractedPostCode = $Matches[1].Trim()
+    }
+
+    return [PSCustomObject]@{
+        OrderRef       = $OrderRef
+        OrderDate      = $OrderDateBC
+        DeliveryDate   = $deliveryDateBC
+        ShipTo         = $shipTo
+        ShipToPostCode = $extractedPostCode
+        Lines          = $lines
+        UnknownCodes   = $unknownCodes
+    }
+}
+
+# ---------------------------------------------------------------------------
 # PDF extraction (coordinate-based)
 # ---------------------------------------------------------------------------
 function Get-PdfOrderData {
@@ -437,215 +757,13 @@ function Get-PdfOrderData {
     $mapPath = Join-Path $mapBase 'mapping.json'
 
     # ---- TEXT mode --------------------------------------------------------
+    # Extraction rules live in Get-TextModeOrderData, shared with the office-document
+    # (.odt/.docx) attachment path in Watch-SalesOrderEmail.ps1 — one copy of the rules,
+    # so PDF and office-doc orders can never drift apart.
     if ($Template.PSObject.Properties['extractionMode'] -and $Template.extractionMode -eq 'text') {
-
-        # Delivery date
-        $deliveryDateBC = ''
-        if ($Template.PSObject.Properties['deliveryDateRegex'] -and
-            $allText -match $Template.deliveryDateRegex) {
-            $parsed = [DateTime]::ParseExact(
-                $Matches[1], $Template.dateInputFormat,
-                [System.Globalization.CultureInfo]::InvariantCulture)
-            $deliveryDateBC = $parsed.ToString('yyyy-MM-dd')
-        }
-
-        # Item lines: single pass over PDF text in document order to preserve PDF line sequence
-        $itemLookup = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($itemNo in $BcItemNumbers) {
-            if (-not $itemLookup.ContainsKey($itemNo)) { $itemLookup[$itemNo] = $itemNo }
-        }
-        if (Test-Path $mapPath) {
-            $renames = Get-Content $mapPath | ConvertFrom-Json
-            foreach ($prop in $renames.PSObject.Properties) {
-                $itemLookup[$prop.Name] = $prop.Value
-                if ($prop.Name -ne $prop.Value -and $itemLookup.ContainsKey($prop.Value)) {
-                    $itemLookup.Remove($prop.Value)
-                }
-            }
-        }
-        $lines        = @()
-        $unknownCodes = @()
-        $seenItems    = [System.Collections.Generic.HashSet[string]]::new()
-
-        if ($Template.PSObject.Properties['qtyBeforeCode'] -and $Template.qtyBeforeCode) {
-            # Qty-before-code mode (e.g. Aligro-Demaurex: "54x    2PI...ITEM_CODE 2 PI").
-            # The ordered quantity (54) precedes the item code in the row as {N}x.
-            #
-            # Pattern: \s\d{2,3}\d{6}\s*(\d{1,4})x
-            # Anchors on the full row structure: space + 2-3 digit Pos + 6-digit NoArt + qty.
-            # A naive \d{6}\s*(\d{1,4})x matches at offset inside "200443674100x", yielding
-            # qty=4100 instead of 100. Including the Pos prefix pins the match to row starts.
-            # Dimensions ("60x115cm") and pack labels ("7x") in descriptions are never
-            # preceded by a space+Pos+NoArt sequence — they are never matched.
-            #
-            # (?<![A-Z\-]) on codes prevents substring matches (SMA510-WT inside BL-SMA510-WT)
-            # while allowing codes that follow a digit in a description (e.g. "A4MC-BRA4-WR").
-            $qtyPositions = @([regex]::Matches($allText, '\s\d{2,3}\d{6}\s*(\d{1,4})x') | ForEach-Object {
-                [PSCustomObject]@{ Idx = $_.Index; Qty = [double]$_.Groups[1].Value }
-            })
-            $codeHits = @{}
-            foreach ($code in $itemLookup.Keys) {
-                $m = [regex]::Match($allText, '(?<![A-Z\-])' + [regex]::Escape($code))
-                if ($m.Success) {
-                    $preceding = @($qtyPositions | Where-Object { $_.Idx -lt $m.Index }) | Select-Object -Last 1
-                    if ($preceding) { $codeHits[$code] = @{ Idx = $m.Index; Qty = $preceding.Qty } }
-                }
-            }
-            foreach ($code in ($codeHits.Keys | Sort-Object { $codeHits[$_].Idx })) {
-                $mapped = $itemLookup[$code]
-                if ($seenItems.Add($mapped)) {
-                    $lines += [PSCustomObject]@{
-                        ItemNumber = $mapped
-                        Quantity   = $codeHits[$code].Qty
-                    }
-                }
-            }
-            # Detect codes in Réf.Fourn. column not matched to BC — code followed by pack qty + unit.
-            # Two false-positive guards:
-            #   - Require hyphen in code (filters header/address text like "OFICINA 21140 AV")
-            #   - Require code is not a suffix match of a known BC code (filters "A4MC-CBA4-BR"
-            #     which is description "A4" concatenated with the known code "MC-CBA4-BR")
-            $seenUnknown = [System.Collections.Generic.HashSet[string]]::new()
-            foreach ($m in [regex]::Matches($allText, '(?<![A-Z\-])([A-Z][A-Z0-9\-]{2,})\s+\d+\s+[A-Z]{2,3}')) {
-                $code = $m.Groups[1].Value
-                if ($code -notmatch '-') { continue }
-                if (-not $codeHits.ContainsKey($code) -and $seenUnknown.Add($code)) {
-                    $isSuffix = $codeHits.Keys | Where-Object { $code.EndsWith($_, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
-                    if (-not $isSuffix) { $unknownCodes += $code }
-                }
-            }
-        } elseif ($Template.PSObject.Properties['qtyUnit'] -and $Template.qtyUnit) {
-            # Integer+unit qty mode (e.g. GAFIC: 8PCE, 18PQT).
-            # A general pattern would greedily absorb quantity digits into the code (ELE-BL-LA12PCE
-            # becomes code=ELE-BL-LA1, qty=2). Per-code exact search avoids this entirely.
-            $unitPat  = $Template.qtyUnit
-            $recover  = $Template.PSObject.Properties['recoverFromDesignation'] -and $Template.recoverFromDesignation
-            $codeHits = @{}
-            foreach ($code in $itemLookup.Keys) {
-                $m = [regex]::Match($allText, [regex]::Escape($code) + "(\d+)(?:$unitPat)")
-                if ($m.Success) { $codeHits[$code] = @{ Idx = $m.Index; Qty = $m.Groups[1].Value } }
-            }
-
-            # Collect line records carrying text position, so any line recovered from the Désignation
-            # (below) sorts back into document order alongside the per-code matches.
-            $lineRecs = @()
-            foreach ($code in $codeHits.Keys) {
-                $mapped = $itemLookup[$code]
-                if ($seenItems.Add($mapped)) {
-                    $lineRecs += [PSCustomObject]@{ Idx = $codeHits[$code].Idx; ItemNumber = $mapped; Quantity = [double]$codeHits[$code].Qty }
-                }
-            }
-
-            # Detect codes in VERMES# references not matched to BC — unit suffix forces correct backtracking.
-            # Position-based dedup: if a known code was already matched at the same text position, skip —
-            # the greedy regex may extract a slightly different string (e.g. ELE-M-SM1 vs ELE-M-SM) but
-            # the position overlap proves the item was already handled by the per-code exact search above.
-            $knownPositions = [System.Collections.Generic.HashSet[int]]::new()
-            foreach ($v in $codeHits.Values) { [void]$knownPositions.Add($v.Idx) }
-            $seenUnknown = [System.Collections.Generic.HashSet[string]]::new()
-            $prevIdx     = 0
-            foreach ($m in [regex]::Matches($allText, '#([A-Z][A-Z0-9\-]+)(\d+)(?:' + $unitPat + ')')) {
-                $curIdx = $m.Index
-                if ($knownPositions.Contains($curIdx + 1)) { $prevIdx = $curIdx; continue }
-                $code = $m.Groups[1].Value
-                $qty  = $m.Groups[2].Value
-                if ($codeHits.ContainsKey($code) -or -not $seenUnknown.Add($code)) { $prevIdx = $curIdx; continue }
-
-                # Désignation recovery (GAFIC, gated by recoverFromDesignation): the Ref Fournisseur is
-                # sometimes truncated in its own column (e.g. BL-SMA100-V7) while the full BC item code
-                # appears inside the row's Désignation text (e.g. "...COLORE X7 BL-SMA100-V7-AS [14477]").
-                # Search this row's window (bounded by the previous and current VERMES# anchors) for the
-                # truncated code extended to the next space/bracket; if that fuller string is a BC item
-                # (or mapping alternative) use it. Qty comes from the VERMES# anchor. The leading Ref is
-                # glued to the description (BL-SMA100-V7FEUTRE...) so it self-rejects — only the real code matches.
-                $rec = $null
-                if ($recover) {
-                    $winStart = [Math]::Max(0, $prevIdx)
-                    $window   = $allText.Substring($winStart, $curIdx - $winStart)
-                    foreach ($mm in [regex]::Matches($window, [regex]::Escape($code) + '[^\s\[\]]*')) {
-                        $cand = $mm.Value
-                        if ($cand -eq $code) { continue }   # bare truncated ref — already known not in BC
-                        if ($itemLookup.ContainsKey($cand)) { $rec = $itemLookup[$cand]; break }
-                    }
-                }
-                if ($rec) {
-                    if ($seenItems.Add($rec)) {
-                        $lineRecs += [PSCustomObject]@{ Idx = $curIdx; ItemNumber = $rec; Quantity = [double]$qty }
-                        Write-Host "    [RECOVERED] $code -> $rec (qty $qty) from Désignation" -ForegroundColor Green
-                    }
-                } else {
-                    $unknownCodes += $code
-                }
-                $prevIdx = $curIdx
-            }
-
-            foreach ($r in ($lineRecs | Sort-Object Idx)) {
-                $lines += [PSCustomObject]@{ ItemNumber = $r.ItemNumber; Quantity = $r.Quantity }
-            }
-        } else {
-            # Comma-decimal qty mode (e.g. CR Distribution: 5,20) — single pass over text.
-            $seenUnknown = [System.Collections.Generic.HashSet[string]]::new()
-            foreach ($m in [regex]::Matches($allText, '(?<![A-Z0-9\-])([A-Z][A-Z0-9\-]{2,})\s*(\d+,\d{2})')) {
-                $code = $m.Groups[1].Value
-                if ($itemLookup.ContainsKey($code)) {
-                    $mapped = $itemLookup[$code]
-                    if ($seenItems.Add($mapped)) {
-                        $lines += [PSCustomObject]@{
-                            ItemNumber = $mapped
-                            Quantity   = [double]($m.Groups[2].Value -replace ',', '.')
-                        }
-                    }
-                } elseif ($seenUnknown.Add($code)) {
-                    $unknownCodes += $code
-                }
-            }
-        }
-
-        # Delivery address (template regex fields)
-        $shipTo = $null
-        if ($Template.PSObject.Properties['deliveryNameRegex'] -and $allText -match $Template.deliveryNameRegex) {
-            $addrName     = $Matches[1].Trim()
-            $addrLine1    = ''
-            $addrPostCode = ''
-            $addrCity     = ''
-            $addrCountry  = if ($Template.PSObject.Properties['deliveryCountry']) { $Template.deliveryCountry } else { '' }
-            if ($Template.PSObject.Properties['deliveryAddress1Regex'] -and $allText -match $Template.deliveryAddress1Regex) {
-                $addrLine1 = $Matches[1].Trim()
-            }
-            if ($Template.PSObject.Properties['deliveryPostCodeRegex'] -and $allText -match $Template.deliveryPostCodeRegex) {
-                $addrPostCode = $Matches[1].Trim()
-            }
-            if ($Template.PSObject.Properties['deliveryCityRegex'] -and $allText -match $Template.deliveryCityRegex) {
-                $addrCity = ($Matches[1] -replace '\s+', ' ').Trim()
-            }
-            if ($addrName) {
-                $shipTo = [PSCustomObject]@{
-                    name         = $addrName
-                    addressLine1 = $addrLine1
-                    addressLine2 = ''
-                    city         = $addrCity
-                    postCode     = $addrPostCode
-                    country      = $addrCountry
-                }
-            }
-        }
-
-        # Extract postcode for BC ship-to lookup
-        $extractedPostCode = ''
-        if ($Template.PSObject.Properties['deliveryPostCodeRegex'] -and $allText -match $Template.deliveryPostCodeRegex) {
-            $extractedPostCode = $Matches[1].Trim()
-        }
-
         $pdf.Dispose()
-        return [PSCustomObject]@{
-            OrderRef       = $orderRef
-            OrderDate      = $orderDateBC
-            DeliveryDate   = $deliveryDateBC
-            ShipTo         = $shipTo
-            ShipToPostCode = $extractedPostCode
-            Lines          = $lines
-            UnknownCodes   = $unknownCodes
-        }
+        return Get-TextModeOrderData -AllText $allText -Template $Template -BcItemNumbers $BcItemNumbers `
+            -MapPath $mapPath -OrderRef $orderRef -OrderDateBC $orderDateBC
     }
     # -----------------------------------------------------------------------
 
